@@ -229,6 +229,8 @@ class SamAutomaticMaskGenerator:
         crop_layer_idx: int,
         orig_size: Tuple[int, ...],
     ) -> MaskData:
+        import pdb
+        pdb.set_trace()
         # Crop the image and calculate embeddings
         x0, y0, x1, y1 = crop_box
         cropped_im = image[y0:y1, x0:x1, :]

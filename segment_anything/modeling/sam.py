@@ -130,6 +130,25 @@ class Sam(nn.Module):
             )
         return outputs
 
+    def postprocess_masks_size_list(
+        self,
+        masks: torch.Tensor,
+        input_size,
+        original_size
+    ) -> torch.Tensor:
+        masks = F.interpolate(
+            masks,
+            (self.image_encoder.img_size, self.image_encoder.img_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        mask_list = [] 
+        for i in range(masks.shape[0]) :
+            mask = masks[i, ..., :int(input_size[i][0]), :int(input_size[i][1])].unsqueeze(0)
+            mask = F.interpolate(mask, original_size[i].detach().cpu().numpy().tolist(), mode="bilinear", align_corners=False)
+            mask_list.append(mask)
+        return mask_list
+
     def postprocess_masks(
         self,
         masks: torch.Tensor,

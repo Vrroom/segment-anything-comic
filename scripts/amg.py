@@ -211,6 +211,8 @@ def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output, exist_ok=True)
 
     for t in targets:
+        import pdb
+        pdb.set_trace()
         print(f"Processing '{t}'...")
         image = cv2.imread(t)
         if image is None:

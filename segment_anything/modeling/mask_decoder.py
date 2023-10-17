@@ -75,6 +75,8 @@ class MaskDecoder(nn.Module):
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
         multimask_output: bool,
+        interleave=True,
+        return_prompt_tokens=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -91,12 +93,24 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predicted masks
           torch.Tensor: batched predictions of mask quality
         """
-        masks, iou_pred = self.predict_masks(
-            image_embeddings=image_embeddings,
-            image_pe=image_pe,
-            sparse_prompt_embeddings=sparse_prompt_embeddings,
-            dense_prompt_embeddings=dense_prompt_embeddings,
-        )
+        if return_prompt_tokens :
+            masks, iou_pred, prompt_tokens = self.predict_masks(
+                image_embeddings=image_embeddings,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_prompt_embeddings,
+                dense_prompt_embeddings=dense_prompt_embeddings,
+                interleave=interleave,
+                return_prompt_tokens=True
+            )
+        else :
+            masks, iou_pred = self.predict_masks(
+                image_embeddings=image_embeddings,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_prompt_embeddings,
+                dense_prompt_embeddings=dense_prompt_embeddings,
+                interleave=interleave,
+                return_prompt_tokens=False
+            )
 
         # Select the correct mask or masks for output
         if multimask_output:
@@ -107,6 +121,8 @@ class MaskDecoder(nn.Module):
         iou_pred = iou_pred[:, mask_slice]
 
         # Prepare output
+        if return_prompt_tokens :
+            return masks, iou_pred, prompt_tokens
         return masks, iou_pred
 
     def predict_masks(
@@ -115,6 +131,8 @@ class MaskDecoder(nn.Module):
         image_pe: torch.Tensor,
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
+        interleave=True,
+        return_prompt_tokens=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
@@ -123,7 +141,10 @@ class MaskDecoder(nn.Module):
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
 
         # Expand per-image data in batch direction to be per-mask
-        src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
+        if interleave:
+            src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
+        else :
+            src = image_embeddings
         src = src + dense_prompt_embeddings
         pos_src = torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)
         b, c, h, w = src.shape
@@ -132,6 +153,7 @@ class MaskDecoder(nn.Module):
         hs, src = self.transformer(src, pos_src, tokens)
         iou_token_out = hs[:, 0, :]
         mask_tokens_out = hs[:, 1 : (1 + self.num_mask_tokens), :]
+        prompt_token_out = hs[:, (1 + self.num_mask_tokens):, :]
 
         # Upscale mask embeddings and predict masks using the mask tokens
         src = src.transpose(1, 2).view(b, c, h, w)
@@ -146,6 +168,8 @@ class MaskDecoder(nn.Module):
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
 
+        if return_prompt_tokens: 
+            return masks, iou_pred, prompt_token_out
         return masks, iou_pred
 
 
