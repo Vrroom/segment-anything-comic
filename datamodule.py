@@ -6,17 +6,45 @@ from einops import rearrange
 import pickle
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split, Dataset
+from torch.utils.data import DataLoader, random_split, Dataset, ConcatDataset
 from torchvision import datasets, transforms
 import os
 from osTools import *
-from PIL import Image
+from PIL import Image, ImageDraw
 import random
 from segment_anything.utils.transforms import *
-from segment_anything import SamPredictor, sam_model_registry
+from segment_anything import SamPredictor, sam_model_registry, apply_transform_to_pil_without_sam_model, unnormalize_tensor
 from torchTools import *
 from args import *
 import math
+from shapely.affinity import affine_transform
+from shapely.geometry import Point, Polygon
+from shapely.ops import triangulate
+
+def config_plot(ax):
+    """ Function to remove axis tickers and box around a given axis """
+    ax.set_frame_on(False)
+    ax.axis('off')
+
+""" Stolen from https://codereview.stackexchange.com/questions/69833/generate-sample-coordinates-inside-a-polygon """
+def sample_random_points_in_polygon(shape, k=1):
+    "Return list of k points chosen uniformly at random inside the polygon."
+    polygon = Polygon(shape)
+    areas = []
+    transforms = []
+    for t in triangulate(polygon):
+        areas.append(t.area)
+        (x0, y0), (x1, y1), (x2, y2), _ = t.exterior.coords
+        transforms.append([x1 - x0, x2 - x0, y2 - y0, y1 - y0, x0, y0])
+    points = []
+    for transform in random.choices(transforms, weights=areas, k=k):
+        x, y = [random.random() for _ in range(2)]
+        if x + y > 1:
+            p = Point(1 - x, 1 - y)
+        else:
+            p = Point(x, y)
+        points.append(affine_transform(p, transform))
+    return [p.coords for p in points]
 
 def sorted_points(points):
     points.sort(key=lambda p: p[0]**2 + p[1]**2)
@@ -43,7 +71,14 @@ def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) :
     """ This visualized a batch from the dataset """ 
     batch = tensorApply(batch, lambda x: x.to(torch.device('cuda')))
     # extract stuff from batch
-    features = batch['features']
+
+    if 'features' in batch : 
+        features = batch['features']
+    else : 
+        assert 'img' in batch, "Either image or features needed for this" 
+        with torch.no_grad() : 
+            features = sam_model.image_encoder(batch['img'])
+
     point_coords = batch['point_coords']
     point_labels = batch['point_labels']
     original_size = batch['original_size']
@@ -74,26 +109,41 @@ def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) :
 
     # Upscale the masks to the original image resolution
     masks = sam_model.postprocess_masks_size_list(low_res_masks, input_size, original_size)
-    masks = torch.cat(masks)
-    masks = masks > sam_model.mask_threshold
-    n_masks = masks.shape[0]
-    best_masks = masks[torch.arange(n_masks), torch.argmax(iou_predictions, 1)].detach().cpu().numpy()
+    n_masks = len(masks) 
+    best_masks = []
+    # process and select best masks
+    for i, mask in enumerate(masks) : 
+        mask_threshed = (mask > sam_model.mask_threshold).squeeze()
+        best_masks.append(mask_threshed[torch.argmax(iou_predictions[i])].detach().cpu().numpy()) 
 
     plots = []
     for i in range(n_masks) :
-        fig, (ax1, ax2) = plt.subplots(1, 2)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
         mask_to_show = best_masks[i]
         pts = normalized_point_to_image_point(shape[i], input_size[i], original_size[i]).detach().cpu().numpy()
 
         if outputs is not None: 
             pred_pts = normalized_point_to_image_point(outputs['pred'][i], input_size[i], original_size[i]).detach().cpu().numpy()
-            ax1.scatter(pred_pts[:, 0], pts[:, 1], c='b', marker='x')
+            ax1.scatter(pred_pts[:, 0], pts[:, 1], c='b', marker='x', alpha=0.5)
 
-        ax1.scatter(pts[:, 0], pts[:, 1], c='r')
+        ax1.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
         sample_point = model_point_to_image_point(point_coords[i], input_size[i], original_size[i]).detach().cpu().numpy()
         ax1.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
-        ax1.imshow(mask_to_show)
-        ax2.imshow(Image.open(f'{dataset.folders[index[i]]}/img.png'))
+        ax1.imshow(mask_to_show, cmap='gray')
+
+        # handle the case where the image is provided in the batch
+        if 'img' in batch : 
+            h, w = input_size[i]
+            img = unnormalize_tensor(batch['img'][i])
+            vis_img = normalize2UnitRange(img).permute(1,2,0).detach().cpu().numpy()[:h, :w]
+            ax2.imshow(vis_img)
+        else : 
+            ax2.imshow(Image.open(f'{dataset.folders[index[i]]}/img.png'))
+
+        # remove ticks and box
+        config_plot(ax1)
+        config_plot(ax2)
+
         plots.append(fig_to_pil(fig))
         plt.close(fig)
 
@@ -176,10 +226,13 @@ def split_train_test (data, train_percent) :
 
 class FrameDataset(Dataset):
 
-    def __init__(self, folders_list, target_img_size=1024):
+    def __init__(self, folders_list, target_img_size=1024, precompute_features=True):
         self.folders = folders_list
         self.target_img_size = target_img_size
-        self.features = torch.cat([torch.load(osp.join(_, 'vit_h_features.pt'), map_location='cpu') for _ in self.folders])
+        self.precompute_features = precompute_features
+        if self.precompute_features : 
+            self.features = torch.cat([torch.load(osp.join(_, 'vit_h_features.pt'), map_location='cpu') for _ in self.folders])
+        self.pil_paths = [osp.join(_, 'img.png') for _ in self.folders]
         self.img_sizes = [np.array(Image.open(osp.join(_, 'img.png'))).shape[:2] for _ in self.folders]
         self.transform = ResizeLongestSide(target_img_size)
         # now load the data
@@ -198,7 +251,10 @@ class FrameDataset(Dataset):
 
     def __getitem__(self, i):
         # get features
-        features = self.features[i] 
+        if self.precompute_features : 
+            features = self.features[i] 
+        else : 
+            img = apply_transform_to_pil_without_sam_model(Image.open(self.pil_paths[i]), 'cpu').squeeze()
 
         # get original and transformed image sizes
         original_size = self.img_sizes[i]
@@ -224,9 +280,140 @@ class FrameDataset(Dataset):
         # cast to tensor 
         original_size = torch.tensor(original_size)
         input_size = torch.tensor(input_size)
+    
 
+        if self.precompute_features : 
+            return dict(
+                features=features,            # [256, 64, 64]
+                point_coords=point_coords,    # [1, 2] 
+                point_labels=point_labels,    # [1]
+                original_size=original_size,  # [2]
+                input_size=input_size,        # [2]
+                shape=shape,                  # [4, 2], float, [-1.0, 1.0]
+                index=torch.tensor([i])       # [1]
+            )
+        else : 
+            # now the model training code will compute features. We'll just give the image
+            return dict(
+                img=img,                      # [3, 1024, 1024]
+                point_coords=point_coords,    # [1, 2] 
+                point_labels=point_labels,    # [1]
+                original_size=original_size,  # [2]
+                input_size=input_size,        # [2]
+                shape=shape,                  # [4, 2], float, [-1.0, 1.0]
+                index=torch.tensor([i])       # [1]
+            )
+
+def generate_simple_comic_layout():
+    while True :
+        # Choose an aspect ratio
+        aspect_ratios = [
+            {"width": 1, "height": 1},
+            {"width": 4, "height": 3},
+            {"width": 16, "height": 9},
+            {"width": 21, "height": 9},
+            {"width": 3, "height": 2},
+            {"width": 9, "height": 16},
+            {"width": 2.35, "height": 1},
+            {"width": 1.85, "height": 1}
+        ]
+        chosen_ratio = random.choice(aspect_ratios)
+
+        # Set image dimensions
+        if chosen_ratio["width"] > chosen_ratio["height"]:
+            width = 1024
+            height = int(width / chosen_ratio["width"] * chosen_ratio["height"])
+        else:
+            height = 1024
+            width = int(height * chosen_ratio["width"] / chosen_ratio["height"])
+
+        # Create an image with background color
+        background_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+        img = Image.new("RGB", (width, height), background_color)
+        draw = ImageDraw.Draw(img)
+
+        # Border settings
+        border_thickness = random.randint(1, 20)
+        border_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+        # Gutter settings
+        gutter = random.choice([True, False])
+        gutter_width = random.randint(1, 20) if gutter else 0
+
+        # Margin settings
+        margin_x = random.randint(0, width // 10)
+        margin_y = random.randint(0, height // 10)
+
+        # Rows and Columns
+        rows = random.choice([2, 3, 4])
+        row_height = (height - 2 * margin_y - (rows - 1) * gutter_width) // rows
+
+        y_start = margin_y
+        boxes = []
+        for _ in range(rows):
+            cols = random.choice([2, 3, 4])
+            col_width = (width - 2 * margin_x - (cols - 1) * gutter_width) // cols
+
+            x_start = margin_x
+            for _ in range(cols):
+                boxes.append((x_start, x_start + col_width, y_start, y_start + row_height))
+                draw.rectangle([(x_start, y_start), (x_start + col_width, y_start + row_height)], fill=None, outline=border_color, width=border_thickness)
+                x_start += col_width + gutter_width
+
+            y_start += row_height + gutter_width
+
+        yield {
+            'img': img, 
+            'original_size': tuple(reversed(img.size)),
+            'boxes': boxes
+        }
+
+class RandomComicLayoutDataset (Dataset) : 
+
+    def __init__(self, random_gen_len=10000, target_img_size=1024):
+        self.random_gen_len = random_gen_len
+        self.target_img_size = target_img_size
+        self.transform = ResizeLongestSide(target_img_size)
+        self.generator = generate_simple_comic_layout()
+
+    def __len__(self):
+        return self.random_gen_len # len(self.folders)
+
+    def __getitem__(self, i):
+        # get features
+        data = next(self.generator)
+        img = apply_transform_to_pil_without_sam_model(data['img'], 'cpu').squeeze()
+
+        # get original and transformed image sizes
+        original_size = data['original_size'] 
+        input_size = original_size_to_input_size(self.transform, original_size)
+
+        boxes = data['boxes']
+        N = len(boxes)
+        shape_id = random.randint(0, N - 1)
+
+        # prepare the shape
+        shape = box_to_shape(boxes[shape_id])
+
+        # now sample random points from the corresponding box
+        point_coords = sample_random_points_in_polygon(shape, 1)[0]
+        point_coords = torch.from_numpy(self.transform.apply_coords(np.array(point_coords).astype(np.float32), original_size)) # [1, 2]
+
+        shape = torch.from_numpy(self.transform.apply_coords(np.array(shape).astype(np.float32), original_size))
+        # normalize the shape
+        shape = (2.0 * (shape / self.target_img_size) - 1.0).float()
+
+        # all the query points are foreground in our case
+        point_labels = torch.ones((1,)).float()
+
+        # cast to tensor 
+        original_size = torch.tensor(original_size)
+        input_size = torch.tensor(input_size)
+
+        # now the model training code will compute features. We'll just give the image
         return dict(
-            features=features,            # [256, 64, 64]
+            img=img,                      # [3, 1024, 1024]
             point_coords=point_coords,    # [1, 2] 
             point_labels=point_labels,    # [1]
             original_size=original_size,  # [2]
@@ -242,12 +429,24 @@ class FrameDataModule(pl.LightningDataModule):
         self.base_dir = args.base_dir
         self.num_workers = args.num_workers
         self.batch_size = args.batch_size
+        self.precompute_features = args.precompute_features
         self.files = deterministic_shuffle(list_base_dir(self.base_dir))
         self.train_files, self.test_files = split_train_test(self.files, 0.9)
 
     def setup(self, stage=None):
-        self.train_data = FrameDataset(self.train_files) 
-        self.test_data = FrameDataset(self.test_files)
+        if self.precompute_features : 
+            self.train_data = FrameDataset(self.train_files, precompute_features=self.precompute_features) 
+            self.test_data = FrameDataset(self.test_files, precompute_features=self.precompute_features)
+        else : 
+            print('Using two datasets') 
+            self.train_data = ConcatDataset([
+                FrameDataset(self.train_files, precompute_features=self.precompute_features),
+                RandomComicLayoutDataset()
+            ])
+            self.test_data = ConcatDataset([
+                FrameDataset(self.train_files, precompute_features=self.precompute_features),
+                RandomComicLayoutDataset(random_gen_len=100) 
+            ])
 
     def train_dataloader(self):
         return DataLoader(self.train_data, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
@@ -259,8 +458,9 @@ class FrameDataModule(pl.LightningDataModule):
         return DataLoader(self.test_data, batch_size=self.batch_size, num_workers=self.num_workers)
 
 if __name__ == "__main__" : 
+    # test with precomputed_features=True
     seed_everything(0)
-    datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=8)))
+    datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=True)))
     datamodule.setup()
     for batch in datamodule.train_dataloader() : 
         break
@@ -268,5 +468,16 @@ if __name__ == "__main__" :
     for k in batch.keys() :
         print(k, batch[k].shape)
     sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
-    visualize_batch(sam_model, batch, datamodule.train_data, save_to='img.png')
+    visualize_batch(sam_model, batch, datamodule.train_data, save_to='img1.png')
 
+    # test with precomputed_features=False
+    seed_everything(0)
+    datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=False)))
+    datamodule.setup()
+    for batch in datamodule.train_dataloader() : 
+        break
+    print(batch.keys())
+    for k in batch.keys() :
+        print(k, batch[k].shape)
+    sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
+    visualize_batch(sam_model, batch, datamodule.train_data, save_to='img2.png')

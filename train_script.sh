@@ -1,6 +1,7 @@
 python3 main.py \
 	--lr 0.0001 \
-	--batch_size 8 \
+	--batch_size 4 \
+	--accumulate_grad_batches 2 \
 	--epochs 100 \
 	--gpus 1 \
 	--seed 0 \

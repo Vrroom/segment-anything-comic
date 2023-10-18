@@ -11,5 +11,5 @@ from .build_sam import (
     build_sam_vit_b,
     sam_model_registry,
 )
-from .predictor import SamPredictor
+from .predictor import SamPredictor, get_features_from_pil_image, apply_transform_to_pil_without_sam_model, unnormalize_tensor
 from .automatic_mask_generator import SamAutomaticMaskGenerator

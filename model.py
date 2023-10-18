@@ -15,7 +15,12 @@ class ComicFramePredictorModule(pl.LightningModule):
 
     def forward(self, batch, stage='train'):
         prefix = '' if stage == 'train' else 'val_'
-        features = batch['features']
+        if 'features' in batch : 
+            features = batch['features']
+        else : 
+            assert 'img' in batch, "Either image or features needed for this" 
+            with torch.no_grad() : 
+                features = self.sam_model.image_encoder(batch['img'])
         point_coords = batch['point_coords']
         point_labels = batch['point_labels']
         original_size = batch['original_size']
@@ -55,7 +60,7 @@ class ComicFramePredictorModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch)
-        self.log('loss', outputs['loss'])
+        self.log('train_loss', outputs['loss'])
         return outputs
 
     def validation_step(self, batch, batch_idx):

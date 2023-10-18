@@ -6,6 +6,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from segment_anything.modeling import Sam
 
@@ -13,6 +14,61 @@ from typing import Optional, Tuple
 
 from .utils.transforms import ResizeLongestSide
 
+@torch.no_grad()
+def get_features_from_pil_image (sam_model, pil_image, device) : 
+    """ Return SAM Encoder features for pil image """
+    input_image = apply_transform_to_pil(sam_model, pil_image, device)
+    # input_image = apply_transform_to_pil_without_sam_model(pil_image, device)
+    features = sam_model.image_encoder(input_image)
+    return features
+
+@torch.no_grad() 
+def apply_transform_to_pil (sam_model, pil_image, device) : 
+    image = np.array(pil_image)
+    transform = ResizeLongestSide(sam_model.image_encoder.img_size)
+    input_image = transform.apply_image(image)
+    input_image_torch = torch.as_tensor(input_image, device=device)
+    input_image_torch = input_image_torch.permute(2, 0, 1).contiguous()[None, :, :, :]
+    input_image = sam_model.preprocess(input_image_torch)
+    return input_image
+
+@torch.no_grad() 
+def apply_transform_to_pil_without_sam_model (pil_image, device, img_size=1024, 
+        pixel_mean=[123.6750, 116.2800, 103.5300], pixel_std=[58.3950, 57.1200, 57.3750]) : 
+    image = np.array(pil_image)
+    transform = ResizeLongestSide(1024)
+    input_image = transform.apply_image(image)
+    input_image_torch = torch.as_tensor(input_image, device=device)
+    x = input_image_torch.permute(2, 0, 1).contiguous()[None, :, :, :]
+    # Normalize colors
+    pixel_mean = torch.tensor(pixel_mean).reshape(3, 1, 1).to(device) 
+    pixel_std = torch.tensor(pixel_std).reshape(3, 1, 1).to(device) 
+    x = (x - pixel_mean) / pixel_std
+    h, w = x.shape[-2:]
+    padh = img_size - h
+    padw = img_size - w
+    x = F.pad(x, (0, padw, 0, padh))
+    return x
+
+def unnormalize_tensor (x, pixel_mean=[123.6750, 116.2800, 103.5300], pixel_std=[58.3950, 57.1200, 57.3750]) : 
+    pixel_mean = torch.tensor(pixel_mean).reshape(3, 1, 1).to(x.device) 
+    pixel_std = torch.tensor(pixel_std).reshape(3, 1, 1).to(x.device) 
+    x = x * pixel_std + pixel_mean
+    return x
+
+@torch.no_grad()
+def apply_transform_to_pils (sam_model, pil_images, device) : 
+    """ Return a tensor that is ready for the sam encoder """ 
+    return torch.cat([apply_transform_to_pil(sam_model, _, device) for _ in pil_images])
+
+@torch.no_grad() 
+def get_features_from_batched_tensor (sam_model, x) : 
+    """ 
+    compute features from batched tensor. 
+
+    making sure everything is on the correct device is your responsibility.
+    """ 
+    return sam_model.image_encoder(x) 
 
 class SamPredictor:
     def __init__(

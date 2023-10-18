@@ -31,5 +31,7 @@ def get_parser () :
     parser.add_argument('--seed', type=int, default=0, help='seed')
     parser.add_argument('--sam_ckpt_path', type=str, default='./checkpoints/sam_vit_h_4b8939.pth', help='path to sam checkpoint')
     parser.add_argument('--base_dir', type=str, default='../comic_data', help='path to dataset')
+    parser.add_argument('--precompute_features', action='store_true', default=False, help='Specifies whether to precompute features using SAM Image Encoder.')
+    parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='number of batches to accumulate gradient over')
     return parser
 
