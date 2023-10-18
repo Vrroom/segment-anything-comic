@@ -14,7 +14,8 @@ class VisualizePoints(Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         global_step = trainer.global_step
-        save_path_base = osp.join(pl_module.logger.log_dir, 'images', 'val')
-        mkdir(save_path_base)
-        save_to = osp.join(save_path_base, f'img_{global_step}.png')
-        visualize_batch(pl_module.sam_model, batch, trainer.datamodule.test_data, outputs=outputs, save_to=save_to)
+        if batch_idx in list(range(10)) : 
+            save_path_base = osp.join(pl_module.logger.log_dir, 'images', 'val')
+            mkdir(save_path_base)
+            save_to = osp.join(save_path_base, f'img_{global_step}_{batch_idx}.png')
+            visualize_batch(pl_module.sam_model, batch, trainer.datamodule.test_data, outputs=outputs, save_to=save_to)

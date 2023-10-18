@@ -4,6 +4,7 @@ from torch import nn
 from segment_anything import SamPredictor, sam_model_registry
 from segment_anything.modeling.mask_decoder import MLP
 import torch.nn.functional as F
+from itertools import chain
 
 class ComicFramePredictorModule(pl.LightningModule):
 
@@ -38,16 +39,16 @@ class ComicFramePredictorModule(pl.LightningModule):
                 masks=None,
             )
 
-            # Predict masks
-            low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
-                image_embeddings=features,
-                image_pe=self.sam_model.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=True,
-                interleave=False, # this ensures correct behaviour when each prompt is for a different image
-                return_prompt_tokens=True
-            )
+        # Predict masks
+        low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
+            image_embeddings=features,
+            image_pe=self.sam_model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+            interleave=False, # this ensures correct behaviour when each prompt is for a different image
+            return_prompt_tokens=True
+        )
 
         out = self.projector(prompt_tokens.reshape(N, -1)).reshape(N, 4, 2)
         loss = F.mse_loss(out, shape)
@@ -69,5 +70,8 @@ class ComicFramePredictorModule(pl.LightningModule):
         return outputs
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.projector.parameters(), lr=self.args.lr)
+        return torch.optim.Adam(
+            chain(self.projector.parameters(), self.sam_model.mask_decoder.parameters()),
+            lr=self.args.lr
+        )
 
