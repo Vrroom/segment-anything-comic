@@ -11,7 +11,8 @@ class ComicFramePredictorModule(pl.LightningModule):
     def __init__(self, args):
         super(ComicFramePredictorModule, self).__init__()
         self.sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth")
-        self.projector = MLP(2 * 256, 256, 8, 3).float()
+        self.projector_x = MLP(2 * 256, 256, 4, 3).float()
+        self.projector_y = MLP(2 * 256, 256, 4, 3).float()
         self.args = args
 
     def forward(self, batch, stage='train'):
@@ -32,12 +33,11 @@ class ComicFramePredictorModule(pl.LightningModule):
 
         points = (point_coords, point_labels)
 
-        with torch.no_grad(): 
-            sparse_embeddings, dense_embeddings = self.sam_model.prompt_encoder(
-                points=points,
-                boxes=None,
-                masks=None,
-            )
+        sparse_embeddings, dense_embeddings = self.sam_model.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
 
         # Predict masks
         low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
@@ -50,28 +50,62 @@ class ComicFramePredictorModule(pl.LightningModule):
             return_prompt_tokens=True
         )
 
-        out = self.projector(prompt_tokens.reshape(N, -1)).reshape(N, 4, 2)
-        loss = F.mse_loss(out, shape)
+        out_x = self.projector_x(prompt_tokens.reshape(N, -1)) # [N, 4]
+        out_y = self.projector_y(prompt_tokens.reshape(N, -1)) # [N, 4]
+
+        out = torch.cat((out_x[..., None], out_y[..., None]), 2) # [N, 4, 2]
+
+        l1 = F.l1_loss(out, shape)
+        l2 = F.mse_loss(out, shape)
+
+        loss = 0.5 * l1 + 0.5 * l2
+
         return {
             'pred': out,
             f'{prefix}loss': loss,
+            f'{prefix}loss_l1': l1,
+            f'{prefix}loss_l2': l2,
             'low_res_masks': low_res_masks,
             'iou_predictions': iou_predictions,
         }
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch)
-        self.log('train_loss', outputs['loss'])
+        for k in outputs.keys() : 
+            if 'loss' in k: 
+                self.log(k, outputs[k])
         return outputs
 
     def validation_step(self, batch, batch_idx):
         outputs = self(batch, stage='val')
-        self.log('val_loss', outputs['val_loss'])
+        for k in outputs.keys() : 
+            if 'loss' in k: 
+                self.log(k, outputs[k])
         return outputs
 
     def configure_optimizers(self):
-        return torch.optim.Adam(
-            chain(self.projector.parameters(), self.sam_model.mask_decoder.parameters()),
+        return torch.optim.Adam(list(self.projector_x.parameters()) \
+                              + list(self.projector_y.parameters()) \
+                              + list(self.sam_model.mask_decoder.parameters()) \
+                              + list(self.sam_model.prompt_encoder.parameters()),
             lr=self.args.lr
         )
+
+if __name__ == "__main__" :
+    # standalone model test
+    from args import get_parser
+    from datamodule import FrameDataModule
+
+    parser = get_parser()
+    args = parser.parse_args()
+
+    data_module = FrameDataModule(args)
+    model = ComicFramePredictorModule(args)
+
+    data_module.setup() 
+    for batch in data_module.train_dataloader() : 
+        break
+
+    model.training_step(batch, 0)
+
 

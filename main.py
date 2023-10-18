@@ -33,11 +33,13 @@ def main():
     data_module = FrameDataModule(args)
     model = ComicFramePredictorModule(args)
 
+    params_to_track = ['projector_x', 'projector_y', 'sam_model.mask_decoder', 'sam_model.prompt_encoder']
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         devices=args.gpus,
         accelerator='gpu',
-        callbacks=[VisualizePoints()],
+        callbacks=[VisualizePoints(), ParameterTracker(params_to_track)],
         accumulate_grad_batches=args.accumulate_grad_batches,
         log_every_n_steps=1,
     )

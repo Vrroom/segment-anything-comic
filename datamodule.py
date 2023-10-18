@@ -47,25 +47,23 @@ def sample_random_points_in_polygon(shape, k=1):
     return [p.coords for p in points]
 
 def sorted_points(points):
+    # sort points based on distance to origin
     points.sort(key=lambda p: p[0]**2 + p[1]**2)
+
+    # pick the first point
     first_point = points[0]
+    x, y = first_point
 
-    cx, cy = sum(x for x, y in points) / len(points), sum(y for x, y in points) / len(points)
-
-    p = first_point[0] - cx, first_point[1] - cy
-    p_perp = -p[1], p[0]
-
-    cb = np.linalg.inv(np.array([[p[0], p_perp[0]], [p[1], p_perp[1]]]))
-
+    # used to sort points based on the angle subtended on first point
     def angle_key(point):
-        p = point[0] - cx, point[1] - cy
-        x, y = (cb @ np.array(p).reshape(-1, 1)).reshape(-1)
-        theta = math.atan2(y, x)
+        px, py = point[0] - x, point[1] - y
+        theta = math.atan2(py, px)
         if theta < 0 :
             theta += 2 * math.pi
         return theta
 
-    return sorted(points, key=angle_key)
+    pts = [first_point] + sorted(points[1:], key=angle_key)
+    return pts
 
 def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) : 
     """ This visualized a batch from the dataset """ 
@@ -124,7 +122,7 @@ def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) :
 
         if outputs is not None: 
             pred_pts = normalized_point_to_image_point(outputs['pred'][i], input_size[i], original_size[i]).detach().cpu().numpy()
-            ax1.scatter(pred_pts[:, 0], pts[:, 1], c='b', marker='x', alpha=0.5)
+            ax1.scatter(pred_pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], marker='x', alpha=0.5)
 
         ax1.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
         sample_point = model_point_to_image_point(point_coords[i], input_size[i], original_size[i]).detach().cpu().numpy()
