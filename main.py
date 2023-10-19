@@ -39,7 +39,7 @@ def main():
         max_epochs=args.epochs,
         devices=args.gpus,
         accelerator='gpu',
-        callbacks=[VisualizePoints(), ParameterTracker(params_to_track)],
+        callbacks=[VisualizePoints(), ParameterTracker(params_to_track), SaveArgs()],
         accumulate_grad_batches=args.accumulate_grad_batches,
         log_every_n_steps=1,
     )

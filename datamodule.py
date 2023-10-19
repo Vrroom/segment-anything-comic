@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, random_split, Dataset, ConcatDataset
 from torchvision import datasets, transforms
 import os
 from osTools import *
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 import random
 from segment_anything.utils.transforms import *
 from segment_anything import SamPredictor, sam_model_registry, apply_transform_to_pil_without_sam_model, unnormalize_tensor
@@ -20,6 +20,7 @@ import math
 from shapely.affinity import affine_transform
 from shapely.geometry import Point, Polygon
 from shapely.ops import triangulate
+from more_itertools import flatten
 
 def config_plot(ax):
     """ Function to remove axis tickers and box around a given axis """
@@ -313,7 +314,14 @@ def generate_simple_comic_layout():
             {"width": 3, "height": 2},
             {"width": 9, "height": 16},
             {"width": 2.35, "height": 1},
-            {"width": 1.85, "height": 1}
+            {"width": 1.85, "height": 1},
+            {"height": 4, "width": 3},
+            {"height": 16, "width": 9},
+            {"height": 21, "width": 9},
+            {"height": 3, "width": 2},
+            {"height": 9, "width": 16},
+            {"height": 2.35, "width": 1},
+            {"height": 1.85, "width": 1}
         ]
         chosen_ratio = random.choice(aspect_ratios)
 
@@ -335,6 +343,13 @@ def generate_simple_comic_layout():
         border_thickness = random.randint(1, 20)
         border_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
+        # Whether to fill the box
+        box_fill = None if random.choice([True, False]) else (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+        # Whether to draw rectangle or rounded rectangle
+        draw_rect = random.random() > 0.25
+        rect_radius = random.randint(1, 50)
+
         # Gutter settings
         gutter = random.choice([True, False])
         gutter_width = random.randint(1, 20) if gutter else 0
@@ -344,27 +359,48 @@ def generate_simple_comic_layout():
         margin_y = random.randint(0, height // 10)
 
         # Rows and Columns
-        rows = random.choice([2, 3, 4])
+        rows = random.choice([1, 2, 3, 4])
         row_height = (height - 2 * margin_y - (rows - 1) * gutter_width) // rows
 
         y_start = margin_y
         boxes = []
         for _ in range(rows):
-            cols = random.choice([2, 3, 4])
+            boxes.append([])
+            cols = random.choice([1, 2, 3, 4])
             col_width = (width - 2 * margin_x - (cols - 1) * gutter_width) // cols
 
             x_start = margin_x
             for _ in range(cols):
-                boxes.append((x_start, x_start + col_width, y_start, y_start + row_height))
-                draw.rectangle([(x_start, y_start), (x_start + col_width, y_start + row_height)], fill=None, outline=border_color, width=border_thickness)
+                boxes[-1].append((x_start, x_start + col_width, y_start, y_start + row_height))
+                if draw_rect : 
+                    draw.rectangle(
+                        [(x_start, y_start), (x_start + col_width, y_start + row_height)], 
+                        fill=box_fill, 
+                        outline=border_color, 
+                        width=border_thickness
+                    )
+                else : 
+                    draw.rounded_rectangle(
+                        [(x_start, y_start), (x_start + col_width, y_start + row_height)], 
+                        radius=rect_radius, 
+                        fill=box_fill, 
+                        outline=border_color, 
+                        width=border_thickness
+                    )
                 x_start += col_width + gutter_width
 
             y_start += row_height + gutter_width
 
+        # Apply gaussian blur so that not overly dependent on sharp edges
+        apply_gaussian_blur = random.random() > 0.25
+        kernel_size = random.choice([2,3,4,5]) 
+        if apply_gaussian_blur : 
+            img = img.filter(ImageFilter.GaussianBlur(kernel_size))
+
         yield {
             'img': img, 
             'original_size': tuple(reversed(img.size)),
-            'boxes': boxes
+            'boxes': list(flatten(boxes))
         }
 
 class RandomComicLayoutDataset (Dataset) : 
