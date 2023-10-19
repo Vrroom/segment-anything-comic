@@ -1,16 +1,34 @@
+from osTools import *
+import cv2
+from logTools import *
+from PIL import Image
+from args import *
+import pickle
 import pytorch_lightning as pl
 import torch
 from torch import nn
-from segment_anything import SamPredictor, sam_model_registry
+from segment_anything import SamPredictor, sam_model_registry, apply_transform_to_pil_without_sam_model
 from segment_anything.modeling.mask_decoder import MLP
+from segment_anything.utils.transforms import *
 import torch.nn.functional as F
 from itertools import chain
+from copy import deepcopy 
+
+def load_model (expt_log_dir) : 
+    args_dict = osp.join(expt_log_dir, 'args.pkl') 
+    ckpt_dir = osp.join(expt_log_dir, 'checkpoints')
+    ckpt_path = listdir(ckpt_dir)[0]
+    print('Loading from checkpoint ...', ckpt_path)
+    with open(args_dict, 'rb') as fp :
+        args = DictWrapper(pickle.load(fp))
+    model = ComicFramePredictorModule.load_from_checkpoint(ckpt_path, args=args)
+    return model
 
 class ComicFramePredictorModule(pl.LightningModule):
 
     def __init__(self, args):
         super(ComicFramePredictorModule, self).__init__()
-        self.sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth")
+        self.sam_model = sam_model_registry["vit_h"](checkpoint=args.sam_ckpt_path)
         self.projector_x = MLP(2 * 256, 256, 4, 3).float()
         self.projector_y = MLP(2 * 256, 256, 4, 3).float()
         self.args = args
@@ -82,6 +100,64 @@ class ComicFramePredictorModule(pl.LightningModule):
             if 'loss' in k: 
                 self.log(k, outputs[k])
         return outputs
+
+    @torch.no_grad()
+    @log_to_dir()
+    def run_inference (self, np_img, point) : 
+        """ 
+        np_img - [H, W, 3]
+        point  - [(x, y), ...], ideally just 1 point
+        """
+        # Import some stuff we need ...
+        from datamodule import original_size_to_input_size, normalized_point_to_image_point
+
+        img_cpy = deepcopy(np_img)
+
+        # Prepare data ...
+        transform = ResizeLongestSide(self.sam_model.image_encoder.img_size)
+
+        original_size = img_cpy.shape[:2]
+        input_size = original_size_to_input_size(transform, original_size)
+
+        img = apply_transform_to_pil_without_sam_model(Image.fromarray(img_cpy), 'cpu').cuda()
+
+        point = torch.from_numpy(transform.apply_coords(np.array(point).astype(np.float32), original_size))[None, ...].cuda() # [1, 1, 2]
+        point_labels = torch.ones((1, 1)).float().cuda()
+
+        # Do inference ... 
+        features = self.sam_model.image_encoder(img)
+
+        points = (point, point_labels)
+
+        sparse_embeddings, dense_embeddings = self.sam_model.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
+
+        # Predict masks ... 
+        low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
+            image_embeddings=features,
+            image_pe=self.sam_model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+            interleave=False, # this ensures correct behaviour when each prompt is for a different image
+            return_prompt_tokens=True
+        )
+
+        out_x = self.projector_x(prompt_tokens.reshape(1, -1)) # [N, 4]
+        out_y = self.projector_y(prompt_tokens.reshape(1, -1)) # [N, 4]
+
+        out = torch.cat((out_x[..., None], out_y[..., None]), 2) # [N, 4, 2]
+        out = out.squeeze()
+        pts = normalized_point_to_image_point(out, input_size, original_size).detach().cpu().numpy().astype(int)
+
+        # Make visualization
+        for point in pts:
+            cv2.drawMarker(img_cpy, point, [255, 0, 0], markerType=5, markerSize=20, thickness=5)
+
+        return img_cpy, pts.tolist()
 
     def configure_optimizers(self):
         return torch.optim.Adam(list(self.projector_x.parameters()) \
