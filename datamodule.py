@@ -1,4 +1,5 @@
 import pytorch_lightning as pl
+import skimage
 from imageOps import *
 from pytorch_lightning import seed_everything
 import matplotlib.pyplot as plt
@@ -21,6 +22,7 @@ from shapely.affinity import affine_transform
 from shapely.geometry import Point, Polygon
 from shapely.ops import triangulate
 from more_itertools import flatten
+from logTools import *
 
 def config_plot(ax):
     """ Function to remove axis tickers and box around a given axis """
@@ -65,6 +67,14 @@ def sorted_points(points):
 
     pts = [first_point] + sorted(points[1:], key=angle_key)
     return pts
+
+def composite_mask(image, mask, alpha=0.2):
+    image = skimage.transform.resize(image, mask.shape, preserve_range=True).astype(np.uint8)
+    white = [255, 255, 255]
+    mask_rgb = np.zeros_like(image)
+    mask_rgb[mask == 1] = white
+    composite = np.uint8(image * (1 - alpha) + mask_rgb * alpha)
+    return composite
 
 def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) : 
     """ This visualized a batch from the dataset """ 
@@ -117,31 +127,35 @@ def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) :
 
     plots = []
     for i in range(n_masks) :
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+        fig, ax = plt.subplots(1, 1)
         mask_to_show = best_masks[i]
-        pts = normalized_point_to_image_point(shape[i], input_size[i], original_size[i]).detach().cpu().numpy()
 
         if outputs is not None: 
+            # Plot predictions
             pred_pts = normalized_point_to_image_point(outputs['pred'][i], input_size[i], original_size[i]).detach().cpu().numpy()
-            ax1.scatter(pred_pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], marker='x', alpha=0.5)
+            ax.scatter(pred_pts[:, 0], pred_pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], marker='x', alpha=0.5)
 
-        ax1.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
+        # Plot GT points
+        pts = normalized_point_to_image_point(shape[i], input_size[i], original_size[i]).detach().cpu().numpy()
+        ax.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
+
+        # Plot Query Point
         sample_point = model_point_to_image_point(point_coords[i], input_size[i], original_size[i]).detach().cpu().numpy()
-        ax1.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
-        ax1.imshow(mask_to_show, cmap='gray')
+        ax.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
 
         # handle the case where the image is provided in the batch
         if 'img' in batch : 
             h, w = input_size[i]
             img = unnormalize_tensor(batch['img'][i])
-            vis_img = normalize2UnitRange(img).permute(1,2,0).detach().cpu().numpy()[:h, :w]
-            ax2.imshow(vis_img)
+            vis_img = (255. * normalize2UnitRange(img).permute(1,2,0).detach().cpu().numpy()[:h, :w]).astype(np.uint8) 
         else : 
-            ax2.imshow(Image.open(f'{dataset.folders[index[i]]}/img.png'))
+            vis_img = np.array(Image.open(f'{dataset.folders[index[i]]}/img.png'))
+
+        vis_img = composite_mask(vis_img, mask_to_show.astype(np.uint8))
+        ax.imshow(vis_img)
 
         # remove ticks and box
-        config_plot(ax1)
-        config_plot(ax2)
+        config_plot(ax)
 
         plots.append(fig_to_pil(fig))
         plt.close(fig)
@@ -303,6 +317,25 @@ class FrameDataset(Dataset):
                 index=torch.tensor([i])       # [1]
             )
 
+def transpose_points (pts) : 
+    assert is_iterable(pts), '(transpose_points): I need an iterable'
+    if all(isinstance(_, int) for _ in pts) : 
+        assert len(pts) == 2, f'(transpose_points): I don\'t know what to do with {len(pts)}-D point' 
+        x, y = pts
+        return y, x
+    else : 
+        return [transpose_points(_) for _ in pts]
+
+def transpose_simple_comic_layout_data (data) : 
+    return {
+        'img': data['img'].rotate(90, expand=True).transpose(Image.FLIP_TOP_BOTTOM),
+        'original_size': transpose_points(data['original_size']),
+        'boxes': fix_boxes(data['boxes']) 
+        # NOTE: ^ this function is wrongly named in this context. 
+        # There is nothing wrong with these boxes. The aim is to 
+        # simply transpose (switch x and y coordinates).
+    }
+
 def generate_simple_comic_layout():
     while True :
         # Choose an aspect ratio
@@ -352,7 +385,7 @@ def generate_simple_comic_layout():
 
         # Gutter settings
         gutter = random.choice([True, False])
-        gutter_width = random.randint(1, 20) if gutter else 0
+        gutter_width = random.randint(1, 50) if gutter else 0
 
         # Margin settings
         margin_x = random.randint(0, width // 10)
@@ -397,11 +430,18 @@ def generate_simple_comic_layout():
         if apply_gaussian_blur : 
             img = img.filter(ImageFilter.GaussianBlur(kernel_size))
 
-        yield {
+        data = {
             'img': img, 
             'original_size': tuple(reversed(img.size)),
             'boxes': list(flatten(boxes))
         }
+
+        # Randomly transpose rows and columns for added flair
+        transpose_data = random.choice([True, False])
+        if transpose_data : 
+            data = transpose_simple_comic_layout_data(data) 
+
+        yield data
 
 class RandomComicLayoutDataset (Dataset) : 
 
@@ -493,7 +533,8 @@ class FrameDataModule(pl.LightningDataModule):
 
 if __name__ == "__main__" : 
     # test with precomputed_features=True
-    seed_everything(0)
+    seed = 2
+    seed_everything(seed)
     datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=True)))
     datamodule.setup()
     for batch in datamodule.train_dataloader() : 
@@ -505,7 +546,7 @@ if __name__ == "__main__" :
     visualize_batch(sam_model, batch, datamodule.train_data, save_to='img1.png')
 
     # test with precomputed_features=False
-    seed_everything(0)
+    seed_everything(seed)
     datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=False)))
     datamodule.setup()
     for batch in datamodule.train_dataloader() : 
@@ -513,5 +554,4 @@ if __name__ == "__main__" :
     print(batch.keys())
     for k in batch.keys() :
         print(k, batch[k].shape)
-    sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
     visualize_batch(sam_model, batch, datamodule.train_data, save_to='img2.png')
