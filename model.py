@@ -1,4 +1,5 @@
 from osTools import *
+from losses import rel_orientation_loss
 import cv2
 from logTools import *
 from PIL import Image
@@ -13,14 +14,34 @@ from segment_anything.utils.transforms import *
 import torch.nn.functional as F
 from itertools import chain
 from copy import deepcopy 
+import re
+
+def parse_ckpt_path(s):
+    pattern = r".*epoch=(\d+)-step=(\d+).ckpt"
+    match = re.search(pattern, s)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    else:
+        return None
 
 def load_model (expt_log_dir) : 
-    args_dict = osp.join(expt_log_dir, 'args.pkl') 
     ckpt_dir = osp.join(expt_log_dir, 'checkpoints')
-    ckpt_path = listdir(ckpt_dir)[0]
+    ckpt_paths = listdir(ckpt_dir)
+    if any('last.ckpt' in _ for _ in ckpt_paths) : 
+        # check for last.ckpt
+        ckpt_path = [_ for _ in ckpt_paths if 'last.ckpt' in _][0]
+    else  :
+        # find the checkpoint with maximum steps 
+        ckpt_path = sorted(ckpt_paths, key=lambda x: parse_ckpt_path(x)[1])[-1]
+
     print('Loading from checkpoint ...', ckpt_path)
+
+    # load model args
+    args_dict = osp.join(expt_log_dir, 'args.pkl') 
     with open(args_dict, 'rb') as fp :
         args = DictWrapper(pickle.load(fp))
+
+    # make model
     model = ComicFramePredictorModule.load_from_checkpoint(ckpt_path, args=args)
     return model
 
@@ -76,13 +97,16 @@ class ComicFramePredictorModule(pl.LightningModule):
         l1 = F.l1_loss(out, shape)
         l2 = F.mse_loss(out, shape)
 
-        loss = 0.5 * l1 + 0.5 * l2
+        angle_loss = rel_orientation_loss(out, shape)
+
+        loss = 0.5 * l1 + 0.25 * l2 + 0.25 * angle_loss
 
         return {
             'pred': out,
             f'{prefix}loss': loss,
             f'{prefix}loss_l1': l1,
             f'{prefix}loss_l2': l2,
+            f'{prefix}loss_angle': angle_loss,
             'low_res_masks': low_res_masks,
             'iou_predictions': iou_predictions,
         }

@@ -75,8 +75,8 @@ def l2 (a, b, eps=1e-5) :
     l2 = torch.sqrt(d2 + eps)
     return l2
 
-def unitNorm(a) : 
-    return a / a.norm(dim=1, keepdim=True)
+def unitNorm(a, dim=1) : 
+    return a / a.norm(dim=dim, keepdim=True)
 
 def ncs (a, b) : 
     """

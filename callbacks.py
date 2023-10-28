@@ -2,6 +2,7 @@ from pytorch_lightning import Callback
 import pickle
 from osTools import *
 from datamodule import * 
+import random
 
 def get_object_by_rel_path (obj, rel_path) : 
     paths = rel_path.split('.')
@@ -21,7 +22,8 @@ class VisualizePoints(Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         global_step = trainer.global_step
-        if batch_idx in list(range(10)) : 
+        plot_val = random.random() < 0.05
+        if plot_val or batch_idx in [2 ** x for x in range(20)] : 
             save_path_base = osp.join(pl_module.logger.log_dir, 'images', 'val')
             mkdir(save_path_base)
             save_to = osp.join(save_path_base, f'img_{global_step}_{batch_idx}.png')
