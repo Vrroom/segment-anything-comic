@@ -50,23 +50,15 @@ def sample_random_points_in_polygon(shape, k=1):
     return [p.coords for p in points]
 
 def sorted_points(points):
-    # sort points based on distance to origin
-    points.sort(key=lambda p: p[0]**2 + p[1]**2)
+    points_by_x = sorted(points, key=lambda p: p[1])
+    first_point, second_point = sorted(points_by_x[:2], key=lambda p: p[0])
+    third_point, fourth_point = list(reversed(sorted(points_by_x[2:], key=lambda p: p[0])))
+    return [first_point, second_point, third_point, fourth_point]
 
-    # pick the first point
-    first_point = points[0]
-    x, y = first_point
-
-    # used to sort points based on the angle subtended on first point
-    def angle_key(point):
-        px, py = point[0] - x, point[1] - y
-        theta = math.atan2(py, px)
-        if theta < 0 :
-            theta += 2 * math.pi
-        return theta
-
-    pts = [first_point] + sorted(points[1:], key=angle_key)
-    return pts
+def merge_boxes(box_list) :
+    np_box_list = np.array(box_list).astype(int)
+    x, X, y, Y = np_box_list[:, 0].min(), np_box_list[:, 1].max(), np_box_list[:, 2].min(), np_box_list[:, 3].max()
+    return x, X, y, Y
 
 def composite_mask(image, mask, alpha=0.2):
     image = skimage.transform.resize(image, mask.shape, preserve_range=True).astype(np.uint8)
@@ -175,6 +167,11 @@ def fig_to_pil (fig) :
 def box_to_shape(box) : 
     x, X, y, Y = box
     return sorted_points([(x, y), (x, Y), (X, Y), (X, y)])
+
+def shape_to_box(shape) : 
+    np_shape = np.array(shape).astype(int) 
+    x, X, y, Y = np_shape[:, 0].min(), np_shape[:, 0].max(), np_shape[:, 1].min(), np_shape[:, 1].max()
+    return x, X, y, Y
 
 def normalized_point_to_image_point (pt, input_size, original_size) : 
     target_img_size = int(max(input_size))
@@ -319,7 +316,7 @@ class FrameDataset(Dataset):
 
 def transpose_points (pts) : 
     assert is_iterable(pts), '(transpose_points): I need an iterable'
-    if all(isinstance(_, int) for _ in pts) : 
+    if all(isinstance(_, int) for _ in pts) or all(isinstance(_, np.int64) for _ in pts) : 
         assert len(pts) == 2, f'(transpose_points): I don\'t know what to do with {len(pts)}-D point' 
         x, y = pts
         return y, x
@@ -330,11 +327,27 @@ def transpose_simple_comic_layout_data (data) :
     return {
         'img': data['img'].rotate(90, expand=True).transpose(Image.FLIP_TOP_BOTTOM),
         'original_size': transpose_points(data['original_size']),
-        'boxes': fix_boxes(data['boxes']) 
+        'shapes': [sorted_points(_) for _ in transpose_points(data['shapes'])]
         # NOTE: ^ this function is wrongly named in this context. 
         # There is nothing wrong with these boxes. The aim is to 
         # simply transpose (switch x and y coordinates).
     }
+
+def convert_box_pair_to_slanted_shapes(box1, box2):
+    x1, X1, y1, Y1 = box1
+    x2, X2, y2, Y2 = box2
+
+    # Delta shift factor
+    d_top = int(random.uniform(-0.4, 0.4) * min(X1 - x1, X2 - x2))
+    d_bot = int(random.uniform(-0.4, 0.4) * min(X1 - x1, X2 - x2))
+
+    # For shape 1
+    shape_1 = sorted_points([(x1, y1), (X1 + d_top, y1), (X1 + d_bot, Y1), (x1, Y1)])
+
+    # For shape 2
+    shape_2 = sorted_points([(x2 + d_top, y2), (X2, y2), (X2, Y2), (x2 + d_bot, Y2)])
+
+    return shape_1, shape_2
 
 def generate_simple_comic_layout():
     while True :
@@ -405,24 +418,67 @@ def generate_simple_comic_layout():
             x_start = margin_x
             for _ in range(cols):
                 boxes[-1].append((x_start, x_start + col_width, y_start, y_start + row_height))
+                x_start += col_width + gutter_width
+
+            y_start += row_height + gutter_width
+
+        shapes = [] 
+        shapeTypes = [] # True if a box. False if general quad
+        for i in range(rows) :  
+            j = 0
+            cols = len(boxes[i])
+            while j < cols : 
+                merge_forward = (random.random() < 0.1)
+                if merge_forward : 
+                    nj = random.choice(list(range(j + 1, cols + 1)))
+                    shapes.append(box_to_shape(merge_boxes(boxes[i][j:nj])))
+                    shapeTypes.append(True) 
+                    j = nj
+                else : 
+                    make_slant = (random.random() < 1.0) and j + 1 < cols 
+                    if make_slant : 
+                        shape_1, shape_2 = convert_box_pair_to_slanted_shapes(boxes[i][j], boxes[i][j+1])
+                        shapes.extend([shape_1, shape_2])
+                        shapeTypes.extend([False, False])
+                        j = j + 2
+                    else : 
+                        shapes.append(box_to_shape(boxes[i][j]))
+                        shapeTypes.append(True)
+                        j = j + 1
+
+        # Render the frames on the image
+        for shape, shapeType in zip(shapes, shapeTypes) : 
+            if shapeType : 
+                # With very low probability, don't draw this shape
+                # Used to simulate negative space frames
+                dont_draw = random.random() < 0.005
+                if dont_draw : 
+                    continue
+                # shape is a box
+                x, X, y, Y =  shape_to_box(shape)
                 if draw_rect : 
                     draw.rectangle(
-                        [(x_start, y_start), (x_start + col_width, y_start + row_height)], 
+                        [(x, y), (X, Y)], 
                         fill=box_fill, 
                         outline=border_color, 
                         width=border_thickness
                     )
                 else : 
                     draw.rounded_rectangle(
-                        [(x_start, y_start), (x_start + col_width, y_start + row_height)], 
+                        [(x, y), (X, Y)], 
                         radius=rect_radius, 
                         fill=box_fill, 
                         outline=border_color, 
                         width=border_thickness
                     )
-                x_start += col_width + gutter_width
-
-            y_start += row_height + gutter_width
+            else : 
+                # shape is a general quad
+                draw.polygon(
+                    shape, 
+                    fill=box_fill, 
+                    outline=border_color,
+                    width=border_thickness
+                )
 
         # Apply gaussian blur so that not overly dependent on sharp edges
         apply_gaussian_blur = random.random() > 0.25
@@ -433,7 +489,7 @@ def generate_simple_comic_layout():
         data = {
             'img': img, 
             'original_size': tuple(reversed(img.size)),
-            'boxes': list(flatten(boxes))
+            'shapes': shapes
         }
 
         # Randomly transpose rows and columns for added flair
@@ -463,14 +519,14 @@ class RandomComicLayoutDataset (Dataset) :
         original_size = data['original_size'] 
         input_size = original_size_to_input_size(self.transform, original_size)
 
-        boxes = data['boxes']
-        N = len(boxes)
+        shapes = data['shapes']
+        N = len(shapes)
         shape_id = random.randint(0, N - 1)
 
         # prepare the shape
-        shape = box_to_shape(boxes[shape_id])
+        shape = shapes[shape_id]
 
-        # now sample random points from the corresponding box
+        # now sample random points from the corresponding shape
         point_coords = sample_random_points_in_polygon(shape, 1)[0]
         point_coords = torch.from_numpy(self.transform.apply_coords(np.array(point_coords).astype(np.float32), original_size)) # [1, 2]
 
@@ -500,6 +556,7 @@ class FrameDataModule(pl.LightningDataModule):
 
     def __init__(self, args):
         super().__init__()
+        print('datamodule_poly.py data module')
         self.base_dir = args.base_dir
         self.num_workers = args.num_workers
         self.batch_size = args.batch_size
@@ -532,26 +589,16 @@ class FrameDataModule(pl.LightningDataModule):
         return DataLoader(self.test_data, batch_size=self.batch_size, num_workers=self.num_workers)
 
 if __name__ == "__main__" : 
-    # test with precomputed_features=True
     seed = 2
-    seed_everything(seed)
-    datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=True)))
-    datamodule.setup()
-    for batch in datamodule.train_dataloader() : 
-        break
-    print(batch.keys())
-    for k in batch.keys() :
-        print(k, batch[k].shape)
     sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
-    visualize_batch(sam_model, batch, datamodule.train_data, save_to='img1.png')
-
     # test with precomputed_features=False
     seed_everything(seed)
     datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=False)))
     datamodule.setup()
-    for batch in datamodule.train_dataloader() : 
-        break
-    print(batch.keys())
-    for k in batch.keys() :
-        print(k, batch[k].shape)
-    visualize_batch(sam_model, batch, datamodule.train_data, save_to='img2.png')
+    for idx, batch in enumerate(datamodule.train_dataloader()) : 
+        print(batch.keys())
+        for k in batch.keys() :
+            print(k, batch[k].shape)
+        visualize_batch(sam_model, batch, datamodule.train_data, save_to=f'img_{idx}.png')
+        if idx > 5 :
+            break
