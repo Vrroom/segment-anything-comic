@@ -183,6 +183,84 @@ class ComicFramePredictorModule(pl.LightningModule):
 
         return img_cpy, pts.tolist()
 
+    @torch.no_grad()
+    def encode_image (self, np_img) : 
+        """ 
+        Use the heavy weight encoder for this 
+        """
+        from datamodule import original_size_to_input_size, normalized_point_to_image_point
+
+        img_cpy = deepcopy(np_img)
+
+        # Prepare data ...
+        transform = ResizeLongestSide(self.sam_model.image_encoder.img_size)
+
+        original_size = img_cpy.shape[:2]
+        input_size = original_size_to_input_size(transform, original_size)
+
+        img = apply_transform_to_pil_without_sam_model(Image.fromarray(img_cpy), 'cpu').cuda()
+
+        # Do inference ... 
+        features = self.sam_model.image_encoder(img)
+        return features
+
+    @torch.no_grad()
+    def run_inference_simple (self, np_img, point, features=None) : 
+        """ 
+        np_img - [H, W, 3]
+        point  - [(x, y), ...], ideally just 1 point
+        
+        No logging and no visualization
+
+        """
+        # Import some stuff we need ...
+        from datamodule import original_size_to_input_size, normalized_point_to_image_point
+
+        img_cpy = deepcopy(np_img)
+
+        # Prepare data ...
+        transform = ResizeLongestSide(self.sam_model.image_encoder.img_size)
+
+        original_size = img_cpy.shape[:2]
+        input_size = original_size_to_input_size(transform, original_size)
+
+        img = apply_transform_to_pil_without_sam_model(Image.fromarray(img_cpy), 'cpu').cuda()
+
+        point = torch.from_numpy(transform.apply_coords(np.array(point).astype(np.float32), original_size))[None, ...].cuda() # [1, 1, 2]
+        point_labels = torch.ones((1, 1)).float().cuda()
+
+        # Do inference ... 
+        if features is None :
+            features = self.sam_model.image_encoder(img)
+
+        points = (point, point_labels)
+
+        sparse_embeddings, dense_embeddings = self.sam_model.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
+
+        # Predict masks ... 
+        low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
+            image_embeddings=features,
+            image_pe=self.sam_model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+            interleave=False, # this ensures correct behaviour when each prompt is for a different image
+            return_prompt_tokens=True
+        )
+
+        out_x = self.projector_x(prompt_tokens.reshape(1, -1)) # [N, 4]
+        out_y = self.projector_y(prompt_tokens.reshape(1, -1)) # [N, 4]
+
+        out = torch.cat((out_x[..., None], out_y[..., None]), 2) # [N, 4, 2]
+        out = out.squeeze()
+        pts = normalized_point_to_image_point(out, input_size, original_size).detach().cpu().numpy().astype(int)
+
+        return pts.tolist()
+
     def configure_optimizers(self):
         return torch.optim.Adam(list(self.projector_x.parameters()) \
                               + list(self.projector_y.parameters()) \

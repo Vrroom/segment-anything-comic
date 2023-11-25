@@ -4,7 +4,7 @@ import base64, io
 
 ENCODING = 'utf-8'
 
-def make_image_grid (images, row_major=True):
+def make_image_grid (images, row_major=True, gutter=True):
     """
     Make a large image where the images are stacked.
 
@@ -19,20 +19,24 @@ def make_image_grid (images, row_major=True):
             H = min(a.size[1] for a in images)
             images = [a.resize((int(H * a.size[0] / a.size[1]), H)) for a in images]
             W = sum(a.size[0] for a in images)
+            gutter_width = int(0.01 * W) if gutter else 0
+            W += (len(images) - 1) * gutter_width
             img = Image.new('RGB', (W, H))
             cSum = 0
             for a in images :
                 img.paste(a, (cSum, 0))
-                cSum += a.size[0]
+                cSum += (a.size[0] + gutter_width)
         else :
             W = min(a.size[0] for a in images)
             images = [a.resize((W, int(W * a.size[1] / a.size[0]))) for a in images]
             H = sum(a.size[1] for a in images)
+            gutter_width = int(0.01 * W) if gutter else 0
+            H += (len(images) - 1) * gutter_width
             img = Image.new('RGB', (W, H))
             cSum = 0
             for a in images :
                 img.paste(a, (0, cSum))
-                cSum += a.size[1]
+                cSum += (a.size[1] + gutter_width)
         return img
 
 def imsave (arr, fname) : 
@@ -63,6 +67,17 @@ def aspectRatioPreservingResize (arr, smaller_dim) :
     if arr.dtype in [float, np.float32, np.float64] :
         np_arr /= 255.0
     return np_arr
+
+def aspectRatioPreservingResizePIL (pil_img, smaller_dim) :
+    """ utility for resizing image, ensuring that smaller dimension matches """
+    h, w = pil_img.size
+    if h < w :
+        h, w = smaller_dim, smaller_dim * w / h
+    else :
+        h, w = smaller_dim * h / w, smaller_dim
+    h, w = int(h), int(w)
+    resized = pil_img.resize((h, w))
+    return resized
     
 def imgArrayToPILRGB (arr) : 
     """ utility to convert img array to 3 channel PIL """

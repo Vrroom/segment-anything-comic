@@ -1,4 +1,5 @@
 import pytorch_lightning as pl
+import faiss
 import skimage
 from imageOps import *
 from pytorch_lightning import seed_everything
@@ -23,11 +24,67 @@ from shapely.geometry import Point, Polygon
 from shapely.ops import triangulate
 from more_itertools import flatten
 from logTools import *
+import cv2
+from copy import deepcopy
+from boxes import *
+
+def create_shape_mask (points_np, box, chosen_width) : 
+    """
+    Creates a tight mask for the shape with img_width
+    """ 
+    points_np[:, 0] -= box.x
+    points_np[:, 1] -= box.y
+    points_np *= chosen_width / box.w
+    points_np = np.clip(points_np, 0, np.inf)
+    points_np = points_np.astype(int)
+    new_box = points_to_box(points_np)
+    mask = np.zeros((new_box.h, new_box.w)).astype(np.uint8)
+    cv2.fillPoly(mask, [points_np], 255)
+    return mask
+
+def alpha_composite_img_in_box (img_a, img_b, box) : 
+    img_b = img_b.resize((box.w, box.h)) 
+    img_b_big = Image.new('RGBA', img_a.size, (0, 0, 0, 0))
+    img_b_big.paste(img_b, (box.x, box.y)) 
+    result = Image.alpha_composite(img_a.convert('RGBA'), img_b_big).convert('RGB')
+    return result
+
+def get_random_crop_from_image (img, points) :
+    # first figure out an appropriate scaling factor
+    points_np = np.array(points).astype(float)
+    shape_box = points_to_box(points_np) 
+    aspect = shape_box.h / shape_box.w 
+    img_w, img_h = img.size
+    pad_w, pad_h = int(img_w * 0.075), int(img_h * 0.075)
+    chosen_width = int(random.choice([0.5, 0.6, 0.8, 0.9]) * min(img_w - 2 * pad_w, (img_h - 2 * pad_h) / aspect))
+    # create shape mask 
+    shape_mask = create_shape_mask(points_np, shape_box, chosen_width) 
+    H, W = shape_mask.shape
+    # create a random crop with the shape mask
+    st_x, st_y = random.randint(pad_w, img_w - W - pad_w - 1), random.randint(0, img_h - H - pad_h - 1)
+    img_np = np.array(img)
+    rgb = img_np[st_y:st_y + H, st_x:st_x + W] 
+    rgba = np.concatenate((rgb, shape_mask.reshape(H, W, 1)), axis=2)
+    return Image.fromarray(rgba, 'RGBA')
+
+def prepare_rand_comic_panel (base_img, imgs, shapes) : 
+    for img, shape in zip(imgs, shapes) : 
+        crop = get_random_crop_from_image(img, shape)
+        base_img = alpha_composite_img_in_box(base_img, crop, points_to_box(np.array(shape)))
+    return base_img
 
 def config_plot(ax):
     """ Function to remove axis tickers and box around a given axis """
     ax.set_frame_on(False)
     ax.axis('off')
+
+def polygon_area (shape) : 
+    """ calculate the area of a polygon using shapely """ 
+    if isinstance(shape, Polygon) :
+        polygon = shape
+    else : 
+        polygon = Polygon(shape)
+    return sum(t.area for t in triangulate(polygon))
 
 """ Stolen from https://codereview.stackexchange.com/questions/69833/generate-sample-coordinates-inside-a-polygon """
 def sample_random_points_in_polygon(shape, k=1):
@@ -144,6 +201,49 @@ def visualize_batch (sam_model, batch, dataset, outputs=None, save_to=None) :
             vis_img = np.array(Image.open(f'{dataset.folders[index[i]]}/img.png'))
 
         vis_img = composite_mask(vis_img, mask_to_show.astype(np.uint8))
+        ax.imshow(vis_img)
+
+        # remove ticks and box
+        config_plot(ax)
+
+        plots.append(fig_to_pil(fig))
+        plt.close(fig)
+
+    if save_to is not None: 
+        make_image_grid(plots, False).save(save_to)
+    else :
+        plt.imshow(make_image_grid(plots, False))
+        plt.show()
+
+def visualize_batch_without_sam (batch, dataset, outputs=None, save_to=None) : 
+    """ This visualized a batch from the dataset """ 
+    point_coords = batch['point_coords']
+    point_labels = batch['point_labels']
+    original_size = batch['original_size']
+    input_size = batch['input_size']
+    shape = batch['shape']
+    index = batch['index']
+
+    plots = []
+    for i in range(shape.shape[0]) :
+        fig, ax = plt.subplots(1, 1)
+
+        # Plot GT points
+        pts = normalized_point_to_image_point(shape[i], input_size[i], original_size[i]).detach().cpu().numpy()
+        ax.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
+
+        # Plot Query Point
+        sample_point = model_point_to_image_point(point_coords[i], input_size[i], original_size[i]).detach().cpu().numpy()
+        ax.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
+
+        # handle the case where the image is provided in the batch
+        if 'img' in batch : 
+            h, w = input_size[i]
+            img = unnormalize_tensor(batch['img'][i])
+            vis_img = (255. * normalize2UnitRange(img).permute(1,2,0).detach().cpu().numpy()[:h, :w]).astype(np.uint8) 
+        else : 
+            vis_img = np.array(Image.open(f'{dataset.folders[index[i]]}/img.png'))
+
         ax.imshow(vis_img)
 
         # remove ticks and box
@@ -349,7 +449,19 @@ def convert_box_pair_to_slanted_shapes(box1, box2):
 
     return shape_1, shape_2
 
-def generate_simple_comic_layout():
+def generate_simple_comic_layout(image_index_and_paths=None):
+    if image_index_and_paths is not None :
+        # make image index so that we can mine similar images
+        # to make our dummy comic book panel
+        image_index, image_paths = image_index_and_paths
+        with open(image_paths) as fp : 
+            image_paths = [_.strip() for _ in fp.readlines()]
+        image_index = np.load(image_index).astype(np.float32)
+        image_index = image_index / np.linalg.norm(image_index, axis=1).reshape(-1, 1)
+        faiss_index = faiss.IndexFlatIP(768)
+        faiss_index.add(image_index)
+        print('Finished preparing Image Index') 
+
     while True :
         # Choose an aspect ratio
         aspect_ratios = [
@@ -397,7 +509,7 @@ def generate_simple_comic_layout():
         rect_radius = random.randint(1, 50)
 
         # Gutter settings
-        gutter = random.choice([True, False])
+        gutter = random.choice([True, True, True, False])
         gutter_width = random.randint(1, 50) if gutter else 0
 
         # Margin settings
@@ -480,6 +592,21 @@ def generate_simple_comic_layout():
                     width=border_thickness
                 )
 
+        # Fill the shapes with images
+        if image_index_and_paths is not None : 
+            add_images = random.random() > 0.33
+            # if there is no gutter, then it is a bit hard to make out what is happening
+            if add_images and gutter: 
+                first_image_id = random.randint(0, len(image_paths) - 1) 
+                all_image_idx = faiss_index.search(image_index[first_image_id:first_image_id+1], len(shapes))[1][0].tolist()
+                imgs = [Image.open(image_paths[_]).convert('RGB') for _ in all_image_idx]
+                try : 
+                    img_ = deepcopy(img)
+                    img_ = prepare_rand_comic_panel(img_, imgs, shapes)
+                    img = img_
+                except Exception as e: 
+                    print(e)
+
         # Apply gaussian blur so that not overly dependent on sharp edges
         apply_gaussian_blur = random.random() > 0.25
         kernel_size = random.choice([2,3,4,5]) 
@@ -501,11 +628,11 @@ def generate_simple_comic_layout():
 
 class RandomComicLayoutDataset (Dataset) : 
 
-    def __init__(self, random_gen_len=10000, target_img_size=1024):
+    def __init__(self, random_gen_len=10000, target_img_size=1024, image_index_and_paths=None):
         self.random_gen_len = random_gen_len
         self.target_img_size = target_img_size
         self.transform = ResizeLongestSide(target_img_size)
-        self.generator = generate_simple_comic_layout()
+        self.generator = generate_simple_comic_layout(image_index_and_paths=image_index_and_paths)
 
     def __len__(self):
         return self.random_gen_len # len(self.folders)
@@ -557,6 +684,7 @@ class FrameDataModule(pl.LightningDataModule):
     def __init__(self, args):
         super().__init__()
         print('datamodule_poly.py data module')
+        self.image_index_and_paths = args.image_index_and_paths
         self.base_dir = args.base_dir
         self.num_workers = args.num_workers
         self.batch_size = args.batch_size
@@ -572,11 +700,11 @@ class FrameDataModule(pl.LightningDataModule):
             print('Using two datasets') 
             self.train_data = ConcatDataset([
                 FrameDataset(self.train_files, precompute_features=self.precompute_features),
-                RandomComicLayoutDataset()
+                RandomComicLayoutDataset(image_index_and_paths=self.image_index_and_paths)
             ])
             self.test_data = ConcatDataset([
                 FrameDataset(self.train_files, precompute_features=self.precompute_features),
-                RandomComicLayoutDataset(random_gen_len=100) 
+                RandomComicLayoutDataset(random_gen_len=100, image_index_and_paths=self.image_index_and_paths) 
             ])
 
     def train_dataloader(self):
@@ -590,15 +718,21 @@ class FrameDataModule(pl.LightningDataModule):
 
 if __name__ == "__main__" : 
     seed = 2
-    sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
+    # sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
     # test with precomputed_features=False
     seed_everything(seed)
-    datamodule = FrameDataModule(DictWrapper(dict(base_dir='../comic_data', batch_size=4, num_workers=0, precompute_features=False)))
+    datamodule = FrameDataModule(DictWrapper(dict(
+        base_dir='../comic_data', 
+        batch_size=4, 
+        num_workers=4, 
+        precompute_features=False,
+        image_index_and_paths=('../danbooru2021/clip_l_14_all.npy', '../danbooru2021/clip_l_14_all.txt')
+    )))
     datamodule.setup()
     for idx, batch in enumerate(datamodule.train_dataloader()) : 
         print(batch.keys())
         for k in batch.keys() :
             print(k, batch[k].shape)
-        visualize_batch(sam_model, batch, datamodule.train_data, save_to=f'img_{idx}.png')
-        if idx > 5 :
+        visualize_batch_without_sam(batch, datamodule.train_data, save_to=f'img_{idx}.png')
+        if idx > 10 :
             break
