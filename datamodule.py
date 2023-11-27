@@ -449,11 +449,10 @@ def convert_box_pair_to_slanted_shapes(box1, box2):
 
     return shape_1, shape_2
 
-def generate_simple_comic_layout(image_index_and_paths=None):
-    if image_index_and_paths is not None :
+def generate_simple_comic_layout(image_index=None, image_paths=None):
+    if image_index is not None and image_paths is not None :
         # make image index so that we can mine similar images
         # to make our dummy comic book panel
-        image_index, image_paths = image_index_and_paths
         with open(image_paths) as fp : 
             image_paths = [_.strip() for _ in fp.readlines()]
         image_index = np.load(image_index).astype(np.float32)
@@ -593,7 +592,7 @@ def generate_simple_comic_layout(image_index_and_paths=None):
                 )
 
         # Fill the shapes with images
-        if image_index_and_paths is not None : 
+        if image_index is not None and image_paths is not None :
             add_images = random.random() > 0.33
             # if there is no gutter, then it is a bit hard to make out what is happening
             if add_images and gutter: 
@@ -628,11 +627,11 @@ def generate_simple_comic_layout(image_index_and_paths=None):
 
 class RandomComicLayoutDataset (Dataset) : 
 
-    def __init__(self, random_gen_len=10000, target_img_size=1024, image_index_and_paths=None):
+    def __init__(self, random_gen_len=10000, target_img_size=1024, image_index=None, image_paths=None):
         self.random_gen_len = random_gen_len
         self.target_img_size = target_img_size
         self.transform = ResizeLongestSide(target_img_size)
-        self.generator = generate_simple_comic_layout(image_index_and_paths=image_index_and_paths)
+        self.generator = generate_simple_comic_layout(image_index=image_index, image_paths=image_paths)
 
     def __len__(self):
         return self.random_gen_len # len(self.folders)
@@ -684,7 +683,8 @@ class FrameDataModule(pl.LightningDataModule):
     def __init__(self, args):
         super().__init__()
         print('datamodule_poly.py data module')
-        self.image_index_and_paths = args.image_index_and_paths
+        self.image_index = args.image_index
+        self.image_paths = args.image_paths
         self.base_dir = args.base_dir
         self.num_workers = args.num_workers
         self.batch_size = args.batch_size
@@ -700,11 +700,11 @@ class FrameDataModule(pl.LightningDataModule):
             print('Using two datasets') 
             self.train_data = ConcatDataset([
                 FrameDataset(self.train_files, precompute_features=self.precompute_features),
-                RandomComicLayoutDataset(image_index_and_paths=self.image_index_and_paths)
+                RandomComicLayoutDataset(image_index=self.image_index, image_paths=self.image_paths) 
             ])
             self.test_data = ConcatDataset([
                 FrameDataset(self.train_files, precompute_features=self.precompute_features),
-                RandomComicLayoutDataset(random_gen_len=100, image_index_and_paths=self.image_index_and_paths) 
+                RandomComicLayoutDataset(random_gen_len=100, image_index=self.image_index, image_paths=self.image_paths) 
             ])
 
     def train_dataloader(self):
@@ -726,7 +726,8 @@ if __name__ == "__main__" :
         batch_size=4, 
         num_workers=4, 
         precompute_features=False,
-        image_index_and_paths=('../danbooru2021/clip_l_14_all.npy', '../danbooru2021/clip_l_14_all.txt')
+        image_index='../danbooru2021/clip_l_14_all.npy', 
+        image_paths='../danbooru2021/clip_l_14_all.txt'
     )))
     datamodule.setup()
     for idx, batch in enumerate(datamodule.train_dataloader()) : 

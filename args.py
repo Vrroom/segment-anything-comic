@@ -33,5 +33,7 @@ def get_parser () :
     parser.add_argument('--base_dir', type=str, default='../comic_data', help='path to dataset')
     parser.add_argument('--precompute_features', action='store_true', default=False, help='Specifies whether to precompute features using SAM Image Encoder.')
     parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='number of batches to accumulate gradient over')
+    parser.add_argument('--image_index', type=str, default=None, help='image index for fetching similar images')
+    parser.add_argument('--image_paths', type=str, default=None, help='image paths from the index')
     return parser
 
