@@ -119,7 +119,7 @@ def metrics_aggregator(*args):
     return df
 
 def evaluate_metrics_using_generator (generator) : 
-    model = load_model('lightning_logs/version_24')
+    model = load_model('lightning_logs/version_26')
 
     seed = 1000
     seed_everything(seed)

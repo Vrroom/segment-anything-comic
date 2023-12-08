@@ -492,6 +492,8 @@ def generate_simple_comic_layout(image_index=None, image_paths=None):
 
         # Create an image with background color
         background_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        # Most of the times the panels are black or white. Reflect that
+        background_color = random.choice([(255, 255, 255), (0, 0, 0), background_color])
 
         img = Image.new("RGB", (width, height), background_color)
         draw = ImageDraw.Draw(img)
@@ -593,7 +595,7 @@ def generate_simple_comic_layout(image_index=None, image_paths=None):
 
         # Fill the shapes with images
         if image_index is not None and image_paths is not None :
-            add_images = random.random() > 0.33
+            add_images = random.random() > 0.166
             # if there is no gutter, then it is a bit hard to make out what is happening
             if add_images and gutter: 
                 first_image_id = random.randint(0, len(image_paths) - 1) 

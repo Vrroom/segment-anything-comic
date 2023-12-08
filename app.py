@@ -8,7 +8,7 @@ from model import *
 # points color and marker
 color = (0, 255, 0)
 marker = 5
-model = load_model('lightning_logs/version_19')
+model = load_model('lightning_logs/version_26')
 
 with gr.Blocks() as demo:
     with gr.Row():
