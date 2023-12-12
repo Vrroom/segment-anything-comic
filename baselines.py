@@ -19,6 +19,7 @@ from model import *
 from copy import deepcopy 
 import pandas as pd
 from pepperAndCarrotTools import *
+from min_quad import find_minimum_quad
 
 transform = ResizeLongestSide(1024)
 
@@ -58,14 +59,44 @@ def find_best_shape_matching (shape_set_1, shape_set_2, metric, mode='minimum') 
         cost = 1.0 - cost
     return match, cost
 
-def sam (img) :
-    pass
+def sam (sam_model, np_img, point, features) :
+    transform = ResizeLongestSide(sam_model.image_encoder.img_size)
+    original_size = np_img.shape[:2]
+    input_size = original_size_to_input_size(transform, original_size)
+    point = torch.from_numpy(transform.apply_coords(np.array(point).astype(np.float32), original_size))[None, ...].cuda() # [1, 1, 2]
+    point_labels = torch.ones((1, 1)).float().cuda()
+    points = (point, point_labels)
+    sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
+        points=points,
+        boxes=None,
+        masks=None,
+    )
+    low_res_masks, iou_predictions = sam_model.mask_decoder(
+        image_embeddings=features,
+        image_pe=sam_model.prompt_encoder.get_dense_pe(),
+        sparse_prompt_embeddings=sparse_embeddings,
+        dense_prompt_embeddings=dense_embeddings,
+        multimask_output=True,
+        interleave=False, # this ensures correct behaviour when each prompt is for a different image
+    )
+    masks = sam_model.postprocess_masks(low_res_masks, input_size, original_size)
+    n_masks = len(masks) 
+    best_masks = []
+    # process and select best masks
+    for i, mask in enumerate(masks) : 
+        mask_threshed = (mask > sam_model.mask_threshold).squeeze()
+        best_masks.append(mask_threshed[torch.argmax(iou_predictions[i])].detach().cpu().numpy()) 
+
+    best_mask = best_masks[0]
+    y_pt, x_pt = np.where(best_mask) 
+    x, X = x_pt.min(), x_pt.max()
+    y, Y = y_pt.min(), y_pt.max()
+    return np.array([(x, y), (X, y), (X, Y), (x, Y)])
 
 def transform_shape (transform, shape, original_size, target_img_size) :
     shape = torch.from_numpy(transform.apply_coords(np.array(shape).astype(np.float32), original_size))
     shape = (2.0 * (shape / target_img_size) - 1.0).float()
     return shape
-
 
 def draw_shape_on_image (img, shape, input_size, original_size) : 
     pts = normalized_point_to_image_point(shape, input_size, original_size).detach().cpu().numpy().astype(int)
@@ -119,13 +150,15 @@ def metrics_aggregator(*args):
     return df
 
 def evaluate_metrics_using_generator (generator) : 
-    model = load_model('lightning_logs/version_26')
+    model = load_model('lightning_logs/version_27')
+    sam_model = sam_model_registry["vit_h"](checkpoint="./checkpoints/sam_vit_h_4b8939.pth").cuda()
 
     seed = 1000
     seed_everything(seed)
 
     halford_matched_l1_scores, halford_polygon_iou_scores, halford_pck_at_alpha_scores, halford_fraction_matched = [], [], [], []
     ours_matched_l1_scores, ours_polygon_iou_scores, ours_pck_at_alpha_scores = [], [], []
+    sam_matched_l1_scores, sam_polygon_iou_scores, sam_pck_at_alpha_scores = [], [], []
 
     i = 0
     for data in tqdm(generator):
@@ -138,11 +171,12 @@ def evaluate_metrics_using_generator (generator) :
 
         original_size = data['original_size'] 
 
-        point_samples = [list(sample_random_points_in_polygon(shape, 1)[0]) for shape in data['shapes']]
+        point_samples = [[centroid(shape)] for shape in data['shapes']]
 
         original_shapes = [transform_shape(transform, _, original_size, 1024) for _ in data['shapes']]
         halford_shapes = [transform_shape(transform, _, original_size, 1024) for _ in halford(img)]
         ours_shapes = [transform_shape(transform, model.run_inference_simple(np_img, pt, features=features), original_size, 1024) for pt in point_samples]
+        sam_shapes = [transform_shape(transform, sam(sam_model, np_img, pt, features=features), original_size, 1024) for pt in point_samples]
 
         match, score = find_best_shape_matching(original_shapes, halford_shapes, matched_l1_metric)
         halford_matched_l1_scores.append(score)
@@ -163,16 +197,27 @@ def evaluate_metrics_using_generator (generator) :
         match, score = find_best_shape_matching(original_shapes, ours_shapes, lambda x, y: pck_at_alpha(x, y, 0.1, 2*np.sqrt(2)), 'maximum')
         ours_pck_at_alpha_scores.append(score)
 
+        match, score = find_best_shape_matching(original_shapes, sam_shapes, matched_l1_metric)
+        sam_matched_l1_scores.append(score)
+
+        match, score = find_best_shape_matching(original_shapes, sam_shapes, polygon_iou, 'maximum')
+        sam_polygon_iou_scores.append(score)
+
+        match, score = find_best_shape_matching(original_shapes, sam_shapes, lambda x, y: pck_at_alpha(x, y, 0.1, 2*np.sqrt(2)), 'maximum')
+        sam_pck_at_alpha_scores.append(score)
+
         i += 1
 
     print('Halford')
     print(metrics_aggregator(halford_matched_l1_scores, halford_polygon_iou_scores, halford_pck_at_alpha_scores, halford_fraction_matched))
     print('Ours')
     print(metrics_aggregator(ours_matched_l1_scores, ours_polygon_iou_scores, ours_pck_at_alpha_scores))
+    print('SAM')
+    print(metrics_aggregator(sam_matched_l1_scores, sam_polygon_iou_scores, sam_pck_at_alpha_scores))
 
 if __name__ == "__main__" : 
     synthetic_generator = generate_simple_comic_layout()
-    pc_generator = pepper_and_carrot_generator('../pepper_and_carrot_imgs/')
+    pc_generator = pepper_and_carrot_generator('../pepper_and_carrot_imgs/', split='test')
 
     evaluate_metrics_using_generator(pc_generator)
     evaluate_metrics_using_generator(synthetic_generator)

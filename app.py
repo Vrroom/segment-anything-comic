@@ -4,11 +4,10 @@ import numpy as np
 import gradio as gr
 from model import *
 
-
 # points color and marker
 color = (0, 255, 0)
 marker = 5
-model = load_model('lightning_logs/version_26')
+model = load_model('lightning_logs/version_27')
 
 with gr.Blocks() as demo:
     with gr.Row():
@@ -23,9 +22,9 @@ with gr.Blocks() as demo:
             with gr.Column():
                 selected_points = gr.State([])      # store points
                 output_points = gr.State([])        # store outputs
-                with gr.Row():
-                    # gr.Markdown('You can click on the image to select points prompt. Default: foreground_point.')
-                    undo_button = gr.Button('Undo point')
+                # with gr.Row():
+                #     # gr.Markdown('You can click on the image to select points prompt. Default: foreground_point.')
+                #     undo_button = gr.Button('Undo point')
             # run button
             button = gr.Button("Run")
         # show the image with result
@@ -65,14 +64,15 @@ with gr.Blocks() as demo:
                 cv2.drawMarker(temp, point, color, markerType=marker, markerSize=20, thickness=5)
         return temp if isinstance(temp, np.ndarray) else np.array(temp)
 
-    undo_button.click(
-        undo_points,
-        [original_image, selected_points],
-        [input_image]
-    )
+    # undo_button.click(
+    #     undo_points,
+    #     [original_image, selected_points],
+    #     [input_image]
+    # )
 
     # button image
-    button.click(model.run_inference, inputs=[original_image, selected_points],
-                 outputs=[output_image, output_points])
+    # button.click(model.run_inference, inputs=[original_image, selected_points],
+    #             outputs=[output_image, output_points])
+    button.click(model.run_inference_full, inputs=[original_image], outputs=[output_image])
 
 demo.queue().launch(debug=True, enable_queue=True, server_name='0.0.0.0')

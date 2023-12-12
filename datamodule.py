@@ -28,6 +28,67 @@ import cv2
 from copy import deepcopy
 from boxes import *
 
+def centroid(points):
+    """Calculate the centroid of a polygon given its vertices."""
+    x = [p[0] for p in points]
+    y = [p[1] for p in points]
+    return sum(x) / len(points), sum(y) / len(points)
+
+def line_intersection(line1, line2):
+    """Find the intersection of a line and a line segment."""
+    p1, p2, p3, p4 = line1[0], line1[1], line2[0], line2[1]
+
+    b = p1[0] - p3[0], p1[1] - p3[1]
+
+    A = p4[0] - p3[0]
+    B = -(p2[0] - p1[0])
+    C = p4[1] - p3[1]
+    D = -(p2[1] - p1[1])
+
+    det = A * D - B * C
+
+    # Parallel lines case
+    if det == 0:
+        return None
+
+    u = (D * b[0] - B * b[1]) / det
+    t = (-C * b[0] + A * b[1]) / det
+
+    # Check if there is an intersection
+    if t >= -1e-7 and -1e-7 <= u <= 1 + 1e-7:
+        intersection = p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])
+        return intersection
+    else:
+        return None
+
+def find_intersection(shape, point, centroid):
+    """Find intersection of a ray from centroid to a point with the shape."""
+    intersections = []
+    for i in range(len(shape)):
+        next_point = shape[(i + 1) % len(shape)]
+        intersect = line_intersection((centroid, point), (shape[i], next_point))
+        if intersect:
+            intersections.append(intersect)
+    assert len(intersections) > 0, f'No intersections found for shape, {shape}, point, {point} and centroid, {centroid}'
+    return min(intersections, key=lambda x: np.linalg.norm(np.array(x) - np.array(centroid)))
+
+def distance(point1, point2):
+    """Calculate the Euclidean distance between two points."""
+    return torch.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+
+def tapering_function(pointA, pointC, pointB):
+    """Tapering function that is 1 at C and tapers off towards B."""
+    AC = distance(pointA, pointC)
+    AB = distance(pointA, pointB)
+    if AB == 0: return torch.tensor(0.0)
+    ratio = AC / AB
+    return torch.sigmoid(-10 * (ratio - 0.5))
+
+def find_confidence_score (shape, point) : 
+    center = centroid(shape)
+    inters = find_intersection(shape, point, center)
+    return tapering_function(point, center, inters)
+
 def create_shape_mask (points_np, box, chosen_width) : 
     """
     Creates a tight mask for the shape with img_width
@@ -230,11 +291,11 @@ def visualize_batch_without_sam (batch, dataset, outputs=None, save_to=None) :
 
         # Plot GT points
         pts = normalized_point_to_image_point(shape[i], input_size[i], original_size[i]).detach().cpu().numpy()
-        ax.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
+        # ax.scatter(pts[:, 0], pts[:, 1], c=[(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], alpha=0.5)
 
         # Plot Query Point
         sample_point = model_point_to_image_point(point_coords[i], input_size[i], original_size[i]).detach().cpu().numpy()
-        ax.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
+        # ax.scatter(sample_point[:, 0], sample_point[:, 1], c='g') 
 
         # handle the case where the image is provided in the batch
         if 'img' in batch : 
@@ -377,12 +438,15 @@ class FrameDataset(Dataset):
         # prepare the shape
         shape = self.data[i]['shapes'][shape_id]
         shape = torch.from_numpy(self.transform.apply_coords(np.array(shape).astype(np.float32), original_size))
-        # normalize the shape
-        shape = (2.0 * (shape / self.target_img_size) - 1.0).float()
 
         # now sample random points from the corresponding box
         point_coords = [sample_random_point_in_box(self.data[i]['boxes'][shape_id])] 
         point_coords = torch.from_numpy(self.transform.apply_coords(np.array(point_coords).astype(np.float32), original_size)) # [1, 2]
+
+        point_confidence_score = find_confidence_score(shape, point_coords[0]).float().unsqueeze(0) # [1]
+
+        # normalize the shape
+        shape = (2.0 * (shape / self.target_img_size) - 1.0).float()
 
         # all the query points are foreground in our case
         point_labels = torch.ones((1,)).float()
@@ -390,28 +454,29 @@ class FrameDataset(Dataset):
         # cast to tensor 
         original_size = torch.tensor(original_size)
         input_size = torch.tensor(input_size)
-    
 
         if self.precompute_features : 
             return dict(
-                features=features,            # [256, 64, 64]
-                point_coords=point_coords,    # [1, 2] 
-                point_labels=point_labels,    # [1]
-                original_size=original_size,  # [2]
-                input_size=input_size,        # [2]
-                shape=shape,                  # [4, 2], float, [-1.0, 1.0]
-                index=torch.tensor([i])       # [1]
+                features=features,                               # [256, 64, 64]
+                point_coords=point_coords,                       # [1, 2] 
+                point_labels=point_labels,                       # [1]
+                original_size=original_size,                     # [2]
+                input_size=input_size,                           # [2]
+                shape=shape,                                     # [4, 2], float, [-1.0, 1.0]
+                index=torch.tensor([i]),                         # [1]
+                point_confidence_score=point_confidence_score    # [1]
             )
         else : 
             # now the model training code will compute features. We'll just give the image
             return dict(
-                img=img,                      # [3, 1024, 1024]
-                point_coords=point_coords,    # [1, 2] 
-                point_labels=point_labels,    # [1]
-                original_size=original_size,  # [2]
-                input_size=input_size,        # [2]
-                shape=shape,                  # [4, 2], float, [-1.0, 1.0]
-                index=torch.tensor([i])       # [1]
+                img=img,                                         # [3, 1024, 1024]
+                point_coords=point_coords,                       # [1, 2] 
+                point_labels=point_labels,                       # [1]
+                original_size=original_size,                     # [2]
+                input_size=input_size,                           # [2]
+                shape=shape,                                     # [4, 2], float, [-1.0, 1.0]
+                index=torch.tensor([i]),                         # [1]
+                point_confidence_score=point_confidence_score    # [1]
             )
 
 def transpose_points (pts) : 
@@ -656,9 +721,12 @@ class RandomComicLayoutDataset (Dataset) :
 
         # now sample random points from the corresponding shape
         point_coords = sample_random_points_in_polygon(shape, 1)[0]
-        point_coords = torch.from_numpy(self.transform.apply_coords(np.array(point_coords).astype(np.float32), original_size)) # [1, 2]
 
+        # assign a confidence score ot the sampled point on the basis of closeness to centre of shape
+        point_coords = torch.from_numpy(self.transform.apply_coords(np.array(point_coords).astype(np.float32), original_size)) # [1, 2]
         shape = torch.from_numpy(self.transform.apply_coords(np.array(shape).astype(np.float32), original_size))
+        point_confidence_score = find_confidence_score(shape, point_coords[0]).float().unsqueeze(0) # [1]
+
         # normalize the shape
         shape = (2.0 * (shape / self.target_img_size) - 1.0).float()
 
@@ -671,13 +739,14 @@ class RandomComicLayoutDataset (Dataset) :
 
         # now the model training code will compute features. We'll just give the image
         return dict(
-            img=img,                      # [3, 1024, 1024]
-            point_coords=point_coords,    # [1, 2] 
-            point_labels=point_labels,    # [1]
-            original_size=original_size,  # [2]
-            input_size=input_size,        # [2]
-            shape=shape,                  # [4, 2], float, [-1.0, 1.0]
-            index=torch.tensor([i])       # [1]
+            img=img,                                         # [3, 1024, 1024]
+            point_coords=point_coords,                       # [1, 2] 
+            point_labels=point_labels,                       # [1]
+            original_size=original_size,                     # [2]
+            input_size=input_size,                           # [2]
+            shape=shape,                                     # [4, 2], float, [-1.0, 1.0]
+            index=torch.tensor([i]),                         # [1]
+            point_confidence_score=point_confidence_score    # [1]
         )
 
 class FrameDataModule(pl.LightningDataModule):
@@ -726,7 +795,7 @@ if __name__ == "__main__" :
     datamodule = FrameDataModule(DictWrapper(dict(
         base_dir='../comic_data', 
         batch_size=4, 
-        num_workers=4, 
+        num_workers=0, 
         precompute_features=False,
         image_index='../danbooru2021/clip_l_14_all.npy', 
         image_paths='../danbooru2021/clip_l_14_all.txt'
@@ -737,5 +806,5 @@ if __name__ == "__main__" :
         for k in batch.keys() :
             print(k, batch[k].shape)
         visualize_batch_without_sam(batch, datamodule.train_data, save_to=f'img_{idx}.png')
-        if idx > 10 :
+        if idx > 30 :
             break

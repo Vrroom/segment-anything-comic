@@ -14,7 +14,7 @@ def pepper_and_carrot_generator (dataset_path, split='val') :
     idx = list(range(len(annotations)))
     rng.shuffle(idx)
     N = int(len(annotations) * 0.1)
-    st, en = 0 if 'val' else N, N if 'val' else len(annotations)
+    st, en = 0 if split == 'val' else N, N if split == 'val' else len(annotations)
     idx = idx[st:en]
 
     annotations = [annotations[i] for i in idx]
@@ -32,7 +32,7 @@ def pepper_and_carrot_generator (dataset_path, split='val') :
         yield dict(img=img, original_size=original_size, shapes=shapes)
 
 if __name__ == "__main__" : 
-    generator = pepper_and_carrot_generator('../pepper_and_carrot_imgs/')
+    generator = pepper_and_carrot_generator('../pepper_and_carrot_imgs/', split='test')
     for item in tqdm(generator) :
         pass
 
