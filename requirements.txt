@@ -1,0 +1,12 @@
+pytorch_lightning==2.0.9.post0
+scikit-image==0.22.0
+matplotlib==3.8.0
+einops==0.7.0
+torchvision==0.16.0
+shapely==2.0.2
+more_itertools
+opencv-python>=4.8.1
+tensorboard
+pandas
+gradio==3.50.0
+scikit-learn
