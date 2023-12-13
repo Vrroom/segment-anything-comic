@@ -15,6 +15,14 @@ with gr.Blocks() as demo:
 
     with gr.Row().style(equal_height=True):
         with gr.Column():
+            gr.Markdown("""
+            ## Instructions
+
+            * Upload an Image
+            * Select a frame by clicking on it
+            * Hit Run
+            * To try again, undo point or reload app
+            """)
             # input image
             original_image = gr.State(value=None)   # store original image without points, default None
             input_image = gr.Image(type="numpy")
