@@ -4,6 +4,8 @@ Code for training and running a SAM model, modified for predicting polygon segme
 
 ## Installation
 
+Please ensure you have `conda` installed and be prepared with the full path of your installation for which you'll be prompted. In my case, when I tested it on an A10 GB on Lambda Labs, the path to my `conda` installation was `/home/ubuntu/miniconda3`.
+
 ```
 git clone https://github.com/Vrroom/segment-anything-comic.git
 cd segment-anything-comic
