@@ -10,3 +10,4 @@ tensorboard
 pandas
 gradio==3.50.0
 scikit-learn
+gdown==4.7.1

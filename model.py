@@ -80,7 +80,8 @@ def load_model (expt_log_dir) :
         ckpt_path = [_ for _ in ckpt_paths if 'last.ckpt' in _][0]
     else  :
         # find the checkpoint with maximum steps 
-        ckpt_path = sorted(ckpt_paths, key=lambda x: parse_ckpt_path(x)[1])[-1]
+        valid_paths = [_ for _ in ckpt_paths if parse_ckpt_path(_) is not None]
+        ckpt_path = sorted(valid_paths, key=lambda x: parse_ckpt_path(x)[1])[-1]
 
     print('Loading from checkpoint ...', ckpt_path)
 
