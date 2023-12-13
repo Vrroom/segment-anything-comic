@@ -1,6 +1,6 @@
 # Segment Anything Comic
 
-Code for training and running a SAM model, modified for predicting polygon segmentations of comic frames.
+Code for training and running a SAM model, modified for predicting polygon segmentations of comic frames. Please see the report `CS_580_Project.pdf` for details.
 
 ## Installation
 
