@@ -1,8 +1,10 @@
 # Segment Anything Comic
 
-Code for training and running a SAM model, modified for predicting polygon segmentations of comic frames.
+Code for training and running a SAM model, modified for predicting polygon segmentations of comic frames. Please see the report `CS_580_Project.pdf` for details.
 
 ## Installation
+
+Please ensure you have `conda` installed and be prepared with the full path of your installation for which you'll be prompted. In my case, when I tested it on an A10 GB on Lambda Labs, the path to my `conda` installation was `/home/ubuntu/miniconda3`.
 
 ```
 git clone https://github.com/Vrroom/segment-anything-comic.git
