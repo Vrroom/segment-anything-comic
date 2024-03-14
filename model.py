@@ -1,4 +1,5 @@
 from osTools import *
+import hashlib
 from sklearn.cluster import MeanShift
 from losses import rel_orientation_loss
 import cv2
@@ -28,6 +29,19 @@ COLORS = [
     [255, 255, 255]
 ]
 
+def lru_cache_with_hash(hash_function):
+    def decorator(func):
+        cache = {}
+        def wrapped_func(self, arg):
+            hash_key = hash_function(arg)
+            if hash_key in cache:
+                return cache[hash_key]
+            result = func(self, arg)
+            cache[hash_key] = result
+            return result
+        return wrapped_func
+    return decorator
+
 def topk (arr, k) :
     """
     Find top k indices
@@ -51,6 +65,9 @@ def avg (lst) :
         return 0
     return sum(lst) / len(lst)
 
+def hashPILImage(img):
+   return hashlib.md5(img.tobytes()).hexdigest()
+
 def filter_predicted_polygons (polygon_preds, confidence_scores, top_k=40, cluster_size_threshold=0.05) : 
     top_idx = topk(confidence_scores, top_k) 
     polygon_preds = np.array([polygon_preds[i] for i in top_idx])
@@ -72,7 +89,7 @@ def parse_ckpt_path(s):
     else:
         return None
 
-def load_model (expt_log_dir) : 
+def load_model (expt_log_dir, extra_args=dict()) : 
     ckpt_dir = osp.join(expt_log_dir, 'checkpoints')
     ckpt_paths = listdir(ckpt_dir)
     if any('last.ckpt' in _ for _ in ckpt_paths) : 
@@ -88,7 +105,9 @@ def load_model (expt_log_dir) :
     # load model args
     args_dict = osp.join(expt_log_dir, 'args.pkl') 
     with open(args_dict, 'rb') as fp :
-        args = DictWrapper(pickle.load(fp))
+        dict_ = pickle.load(fp)
+        dict_.update(extra_args)
+        args = DictWrapper(dict_)
 
     # make model
     model = ComicFramePredictorModule.load_from_checkpoint(ckpt_path, args=args)
@@ -335,6 +354,27 @@ class ComicFramePredictorModule(pl.LightningModule):
         features = self.sam_model.image_encoder(img)
         return features
 
+    @lru_cache_with_hash(hashPILImage)
+    @torch.no_grad()
+    def encode_image_pil (self, pil_img) : 
+        """ 
+        Use the heavy weight encoder for this 
+        """
+        from datamodule import original_size_to_input_size, normalized_point_to_image_point
+
+        # Prepare data ...
+        transform = ResizeLongestSide(self.sam_model.image_encoder.img_size)
+
+        width, height = pil_img.size 
+        original_size = (height, width)
+        input_size = original_size_to_input_size(transform, original_size)
+
+        img = apply_transform_to_pil_without_sam_model(pil_img, 'cpu').cuda()
+
+        # Do inference ... 
+        features = self.sam_model.image_encoder(img)
+        return features
+
     @torch.no_grad()
     def run_inference_simple (self, np_img, point, features=None) : 
         """ 
@@ -363,6 +403,62 @@ class ComicFramePredictorModule(pl.LightningModule):
         # Do inference ... 
         if features is None :
             features = self.sam_model.image_encoder(img)
+
+        points = (point, point_labels)
+
+        sparse_embeddings, dense_embeddings = self.sam_model.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
+
+        # Predict masks ... 
+        low_res_masks, iou_predictions, prompt_tokens = self.sam_model.mask_decoder(
+            image_embeddings=features,
+            image_pe=self.sam_model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+            interleave=False, # this ensures correct behaviour when each prompt is for a different image
+            return_prompt_tokens=True
+        )
+
+        out_x = self.projector_x(prompt_tokens.reshape(1, -1)) # [N, 4]
+        out_y = self.projector_y(prompt_tokens.reshape(1, -1)) # [N, 4]
+
+        point_confidence_score_pred = self.point_confidence_score_predictor(prompt_tokens.reshape(1, -1)) # [N, 1]
+
+        out = torch.cat((out_x[..., None], out_y[..., None]), 2) # [N, 4, 2]
+        out = out.squeeze()
+        pts = normalized_point_to_image_point(out, input_size, original_size).detach().cpu().numpy().astype(int)
+
+        return pts.tolist()
+    
+    @torch.no_grad()
+    def run_inference_simple_pil (self, pil_img, point, features=None) : 
+        """ 
+        pil_img - 3 channel PIL Image
+        point  - [(x, y), ...], ideally just 1 point
+        
+        No logging and no visualization
+
+        """
+        # Import some stuff we need ...
+        from datamodule import original_size_to_input_size, normalized_point_to_image_point
+
+        # Prepare data ...
+        transform = ResizeLongestSide(self.sam_model.image_encoder.img_size)
+
+        width, height = pil_img.size
+        original_size = (height, width)
+        input_size = original_size_to_input_size(transform, original_size)
+
+        point = torch.from_numpy(transform.apply_coords(np.array(point).astype(np.float32), original_size))[None, ...].cuda() # [1, 1, 2]
+        point_labels = torch.ones((1, 1)).float().cuda()
+
+        # Do inference ... 
+        if features is None :
+            features = self.encode_image_pil(pil_img) 
 
         points = (point, point_labels)
 
